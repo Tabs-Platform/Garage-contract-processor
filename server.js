@@ -11,8 +11,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-// Use /tmp for Vercel serverless (only writable directory)
-const upload = multer({ dest: '/tmp/uploads/' });
+const upload = multer({ dest: 'uploads/' });
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PORT = process.env.PORT || 3000;
 
@@ -36,7 +35,7 @@ const FREQ_UNITS = [
   'Year(s)'
 ];
 
-// --------- Normalizers to keep the output inside those enums -----
+// ---------------- Helpers ----------------
 function clampEnum(value, allowed, fallback) {
   if (!value || typeof value !== 'string') return fallback;
   const byLower = new Map(allowed.map(v => [v.toLowerCase(), v]));
@@ -52,7 +51,6 @@ function normalizeBillingType(bt, hintFields = {}) {
 
   const { tiers, price_per_unit, unit_label } = hintFields || {};
   if (Array.isArray(tiers) && tiers.length > 0) {
-    // If tiers present but we don't know type, prefer Tier unit price
     return 'Tier unit price';
   }
   if (price_per_unit || unit_label) return 'Unit price';
@@ -61,10 +59,8 @@ function normalizeBillingType(bt, hintFields = {}) {
 }
 
 function normalizeFrequency(rawFrequency, rawEvery, rawUnit, fallbackUnit = 'None') {
-  // We try to interpret a few common strings into (every, unit)
   let every = Number.isInteger(rawEvery) ? rawEvery : 1;
   let unit = clampEnum(rawUnit, FREQ_UNITS, null);
-
   const txt = (rawFrequency || '').toLowerCase();
 
   if (!unit) {
@@ -84,10 +80,7 @@ function normalizeFrequency(rawFrequency, rawEvery, rawUnit, fallbackUnit = 'Non
       unit = fallbackUnit;
     }
   }
-
-  // If unit is None, force every=1
   if (unit === 'None') every = 1;
-
   return { every, unit };
 }
 
@@ -96,7 +89,25 @@ function pickNumber(n, fallback = null) {
   return Number.isFinite(x) ? x : fallback;
 }
 
-// ------------- Prompt with stricter Garage-specific fields -------------
+// compute Total value (Garage “Calculated subtotal” style)
+function computeTotalValue(s) {
+  const qty = pickNumber(s.quantity, 1);
+  // One-time means periods = 1
+  const periods = s.frequency_unit === 'None' ? 1 : pickNumber(s.periods, 1);
+
+  // If we have a per-period "total_price", use that
+  const price = pickNumber(s.total_price, null);
+  if (price != null) return +(price * qty * periods).toFixed(2);
+
+  // If price_per_unit is available (usage/unit pricing)
+  const ppu = pickNumber(s.price_per_unit, null);
+  if (ppu != null) return +(ppu * qty * periods).toFixed(2);
+
+  // Tiered/unknown — can't reliably compute
+  return null;
+}
+
+// ------------- Prompt with Garage-specific rules -------------
 function buildSystemPrompt(forceMulti = 'auto') {
   const multiHint =
     forceMulti === 'on'
@@ -117,15 +128,15 @@ Return ONE JSON object with:
 {
   "schedules": [
     {
+      "schedule_label": "string|null",
       "item_name": "string",
       "description": "string|null",
-      "billing_type": "Flat price|Unit price|Tier flat price|Tier unit price",   // pick ONE
-      "total_price": number,               // for flat/tier-flat, the total schedule price
+      "billing_type": "Flat price|Unit price|Tier flat price|Tier unit price",
+      "total_price": number|null,
       "quantity": number|null,
-      "start_date": "YYYY-MM-DD",
+      "start_date": "YYYY-MM-DD|null",
 
-      // Recurrence controls
-      "frequency_every": number|null,      // e.g., 1
+      "frequency_every": number|null,
       "frequency_unit": "None|Day(s)|Week(s)|Semi_month(s)|Month(s)|Year(s)",
 
       "months_of_service": number|null,
@@ -134,16 +145,15 @@ Return ONE JSON object with:
       "net_terms": number|null,
       "rev_rec_category": "string|null",
 
-      // Overage / usage fields (only when billing_type is not "Flat price")
-      "event_to_track": "string|null",     // e.g., "Standard Engagement Overage"
-      "unit_label": "string|null",         // e.g., "session", "seat"
-      "price_per_unit": number|null,       // for Unit price
-      "volume_based": boolean|null,        // for tiered, if volume-based applies
+      "event_to_track": "string|null",
+      "unit_label": "string|null",
+      "price_per_unit": number|null,
+      "volume_based": boolean|null,
       "tiers": [
         {
           "tier_name": "string|null",
           "price": number|null,
-          "applied_when": "string|null",   // human text like ">= 2"
+          "applied_when": "string|null",
           "min_quantity": number|null
         }
       ],
@@ -160,14 +170,12 @@ Return ONE JSON object with:
     "matches": boolean|null,
     "notes": "string|null"
   },
-  "model_recommendations": {
-    "force_multi": boolean|null,
-    "reasons": ["string", "..."]
-  }
+  "model_recommendations": { "force_multi": boolean|null, "reasons": ["string", "..."] }
 }
 Rules:
 - Billing type MUST be one of: "Flat price", "Unit price", "Tier flat price", "Tier unit price".
 - Frequency unit MUST be one of: "None", "Day(s)", "Week(s)", "Semi_month(s)", "Month(s)", "Year(s)".
+- Quantity: for one-time **Flat price** items, default to **1** unless the contract explicitly states the fee is charged per multiple units. If you set quantity > 1 for Flat price, include strong evidence; otherwise set 1 and add an issue explaining why.
 - If billing type is Unit or Tier-Unit, include event_to_track, unit_label, and either price_per_unit or tiers[].
 - Include page+snippet evidence for every extracted price/date line.
 - If uncertain, include the field but set it to null and add an issue.
@@ -208,7 +216,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
     });
     console.log('OpenAI file_id:', uploaded.id);
 
-    // 2) Ask the model for a plain JSON object (avoid schema headaches)
+    // 2) Ask the model for a plain JSON object
     const response = await client.responses.create({
       model: chosenModel,
       input: [
@@ -236,21 +244,47 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
     const schedules = Array.isArray(data.schedules) ? data.schedules : [];
     const normalized = schedules.map((s) => {
+      // Start with any model-supplied issues
+      const issues = Array.isArray(s.issues) ? [...s.issues] : [];
+
       const bt = clampEnum(
         normalizeBillingType(s.billing_type, s),
         BILLING_TYPES,
         'Flat price'
       );
 
-      const { every, unit } = normalizeFrequency(s.frequency, s.frequency_every, s.frequency_unit, 'None');
+      const { every, unit } = normalizeFrequency(
+        s.frequency,
+        s.frequency_every,
+        s.frequency_unit,
+        'None'
+      );
 
-      return {
+      // ---- Quantity heuristic for Flat price ----
+      let qty = pickNumber(s.quantity, null);
+      if (bt === 'Flat price') {
+        if (qty == null || qty > 1) {
+          const desc = `${s.description || ''} ${s.item_name || ''}`.toLowerCase();
+          const looksLikePerUnitMention = /\bx\s*\d+\b|\b\d+\s*(seats?|licenses?|users?)\b/.test(desc);
+          if (qty !== 1) {
+            issues.push(
+              `Quantity normalized to 1 for Flat price (model suggested "${qty}"${looksLikePerUnitMention ? ' based on descriptive copy' : ''}).`
+            );
+          }
+          qty = 1;
+        }
+      }
+
+      // Rev-rec category: leave null by default (you can set in Garage later)
+      const revRec = s.rev_rec_category ?? null;
+
+      const out = {
         schedule_label: s.schedule_label ?? null,
         item_name: String(s.item_name || '').trim(),
         description: s.description ?? null,
         billing_type: bt,
         total_price: pickNumber(s.total_price, null),
-        quantity: pickNumber(s.quantity, null),
+        quantity: qty,
         start_date: s.start_date || null,
 
         frequency_every: pickNumber(every, 1),
@@ -260,24 +294,34 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
         periods: pickNumber(s.periods, 1),
         calculated_end_date: s.calculated_end_date || null,
         net_terms: pickNumber(s.net_terms, 30),
-        rev_rec_category: s.rev_rec_category ?? null,
+        rev_rec_category: revRec,
 
         // overage / usage specifics
         event_to_track: s.event_to_track ?? null,
         unit_label: s.unit_label ?? null,
         price_per_unit: pickNumber(s.price_per_unit, null),
         volume_based: typeof s.volume_based === 'boolean' ? s.volume_based : null,
-        tiers: Array.isArray(s.tiers) ? s.tiers.map(t => ({
-          tier_name: t.tier_name ?? null,
-          price: pickNumber(t.price, null),
-          applied_when: t.applied_when ?? null,
-          min_quantity: pickNumber(t.min_quantity, null)
-        })) : [],
+        tiers: Array.isArray(s.tiers)
+          ? s.tiers.map(t => ({
+              tier_name: t.tier_name ?? null,
+              price: pickNumber(t.price, null),
+              applied_when: t.applied_when ?? null,
+              min_quantity: pickNumber(t.min_quantity, null)
+            }))
+          : [],
 
-        evidence: Array.isArray(s.evidence) ? s.evidence.slice(0,8) : [],
+        evidence: Array.isArray(s.evidence) ? s.evidence.slice(0, 8) : [],
         confidences: s.confidences || {},
-        overall_confidence: pickNumber(s.overall_confidence, 0.7)
+        overall_confidence: pickNumber(s.overall_confidence, 0.7),
+        issues
       };
+
+      // Derived: total_value (Garage “Calculated subtotal” style)
+      out.total_value = computeTotalValue(out);
+      if (out.total_value == null && (out.billing_type.includes('Tier') || (out.tiers||[]).length)) {
+        out.issues.push('Total value not computed for tiered pricing (depends on actual usage).');
+      }
+      return out;
     });
 
     res.json({

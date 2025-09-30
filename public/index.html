@@ -7,63 +7,70 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
-      /* Keep read-only fields fully legible (Safari greys disabled controls) */
-select[disabled],
-input[readonly] {
-  background: #fff !important;
-  color: #111827 !important;
-  opacity: 1 !important;
-}
-/* Remove the “disabled” look on borders */
-select[disabled] {
-  -webkit-text-fill-color: #111827 !important;
-  border-color: #e5e7eb !important;
-}
+      :root {
+        --border:#e5e7eb; --ink:#111827; --muted:#6b7280; --bg:#fff; --card:#fff; --chip:#eef2ff; --chip-ink:#3730a3;
+        --ok:#dcfce7; --ok-ink:#065f46; --warn:#fef3c7; --warn-ink:#92400e; --bad:#fee2e2; --bad-ink:#991b1b;
+      }
+      * { box-sizing: border-box; }
+      body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 24px; color: var(--ink); }
+      h1 { font-size: 22px; margin: 0 0 8px; }
+      h2 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+      .muted { color: var(--muted); font-size: 12px; }
+      .btn { padding:10px 14px; border-radius:12px; border: 1px solid var(--ink); background:var(--ink); color:white; cursor:pointer; font-weight:600; }
 
-      body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 24px; }
-      .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 16px; box-shadow: 0 4px 8px rgba(0,0,0,0.04); margin-bottom: 16px; }
-      .grid { display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
-      .grid2 { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
-      .pill { display:inline-block; padding:2px 8px; border-radius:9999px; background:#eef2ff; color:#3730a3; font-size:12px; font-weight:600; }
-      .danger { background:#fee2e2; color:#991b1b; }
-      .ok { background:#dcfce7; color:#065f46; }
-      .low { background:#fef3c7; color:#92400e; }
-      label { display:block; font-size:12px; color:#6b7280; margin-bottom:2px; }
-      input, textarea, select { width:100%; padding:10px; border:1px solid #e5e7eb; border-radius:10px; font-size:14px; }
-      h1 { font-size: 22px; margin-bottom: 8px; }
-      h2 { font-size: 18px; margin: 16px 0 8px; }
-      .muted { color:#6b7280; font-size:12px; }
-      .btn { padding:10px 14px; border-radius:12px; border: 1px solid #111827; background:#111827; color:white; cursor:pointer; font-weight:600; }
-      table { width:100%; border-collapse: collapse; margin-top: 8px; }
-      th, td { border:1px solid #e5e7eb; padding:8px; text-align:left; font-size:13px; }
-      th { background:#f9fafb; }
+      .card { border: 1px solid var(--border); border-radius: 16px; padding: 16px; background: var(--card); box-shadow: 0 4px 8px rgba(0,0,0,.04); margin: 16px 0; }
+
+      /* Garage-like header grid */
+      .sched-header { display:grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 12px; margin-top: 8px; }
+      .fieldset { border:1px solid var(--border); border-radius: 12px; padding: 10px; background: var(--bg); }
+      .label { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 4px; display:block; }
+      .value { font-size: 14px; }
+
+      .section-title { color:#6d28d9; font-weight: 800; letter-spacing:.06em; margin: 16px 0 8px; }
+      .grid-3 { display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+      .grid-2 { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+      .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: center; }
+
+      input, select, textarea {
+        width:100%; padding:10px; border:1px solid var(--border); border-radius:10px; font-size:14px; background:#fff; color:var(--ink);
+      }
+      input[readonly], select[disabled] {
+        background:#fff !important; color:var(--ink) !important; opacity:1 !important; -webkit-text-fill-color:var(--ink) !important;
+      }
+
+      .pill { display:inline-block; padding:2px 8px; border-radius:9999px; background:var(--chip); color:var(--chip-ink); font-size:12px; font-weight:600; }
+      .conf-ok { background: var(--ok); color: var(--ok-ink); }
+      .conf-warn { background: var(--warn); color: var(--warn-ink); }
+      .conf-bad { background: var(--bad); color: var(--bad-ink); }
+
       .copy { cursor:pointer; font-size:12px; color:#2563eb; }
-      pre { white-space: pre-wrap; }
-      .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .evidence-line { color: var(--muted); font-size:12px; margin-top:4px; }
+
+      /* page header controls */
+      .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+      .toolbar select { height:40px; }
     </style>
   </head>
   <body>
     <h1>Garage Contract → Revenue Schedules</h1>
-    <p class="muted">Upload a PDF, get copy-ready schedules (with confidence, evidence, and Garage enums).</p>
+    <p class="muted">Upload a PDF → get copy-ready schedules that mirror Garage.</p>
 
     <div class="card">
       <form id="uploadForm">
-        <div class="row">
+        <div class="toolbar">
           <input type="file" id="file" name="file" accept="application/pdf" required />
-          <div style="display:flex; gap:8px;">
-            <select id="model">
-              <option value="o3" selected>o3</option>
-              <option value="o4-mini">o4-mini</option>
-              <option value="gpt-4o-mini">gpt-4o-mini</option>
-              <option value="o3-mini">o3-mini</option>
-            </select>
-            <select id="forceMulti">
-              <option value="auto" selected>Auto multi</option>
-              <option value="on">Force multi</option>
-              <option value="off">Single only</option>
-            </select>
-            <button class="btn" type="submit">Analyze</button>
-          </div>
+          <select id="model">
+            <option value="o3" selected>o3</option>
+            <option value="o4-mini">o4-mini</option>
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+            <option value="o3-mini">o3-mini</option>
+          </select>
+          <select id="forceMulti">
+            <option value="auto" selected>Auto multi</option>
+            <option value="on">Force multi</option>
+            <option value="off">Single only</option>
+          </select>
+          <button class="btn" type="submit">Analyze</button>
         </div>
       </form>
       <div id="status" class="muted" style="margin-top:8px;"></div>
@@ -74,10 +81,12 @@ select[disabled] {
     <script>
       const BILLING_TYPES = ['Flat price','Unit price','Tier flat price','Tier unit price'];
       const FREQ_UNITS = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year(s)'];
+
       const $ = (s) => document.querySelector(s);
       const results = $('#results');
       const status = $('#status');
 
+      // ---------- upload & call ----------
       $('#uploadForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         results.innerHTML = '';
@@ -96,99 +105,173 @@ select[disabled] {
         }
       });
 
+      // ---------- render ----------
       function render(data) {
         (data.schedules || []).forEach((s, i) => {
           const conf = s.overall_confidence ?? 0.7;
-          const pillClass = conf >= 0.85 ? 'ok' : (conf < 0.6 ? 'danger' : 'low');
+          const confClass = conf >= 0.85 ? 'conf-ok' : (conf < 0.6 ? 'conf-bad' : 'conf-warn');
+          const totalValue = computeTotalValue(s);
+          const months = deriveMonthsOfService(s);
+
           const card = document.createElement('div');
           card.className = 'card';
+
+          // header strip like Garage
           card.innerHTML = `
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-              <h2>Revenue Schedule ${i+1}</h2>
-              <span class="pill ${pillClass}">Confidence ${Math.round(conf*100)}%</span>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+              <h2>REVENUE SCHEDULE ${i+1}</h2>
+              <span class="pill ${confClass}">Confidence ${Math.round(conf*100)}%</span>
             </div>
 
-            <div class="grid">
+            <div class="sched-header">
+              ${kv('Service start date', s.start_date || '')}
+              ${kv('Total months of service', months ?? '')}
+              ${kv('Calculated service end date', s.calculated_end_date || '')}
+              ${kv('Category for rev rec (optional)', s.rev_rec_category || '')}
+              ${kv('Total value', totalValue != null ? money(totalValue) : '')}
+            </div>
+
+            <div class="section-title">ITEM 1 AND PRICE</div>
+
+            <div class="grid-3">
               ${field('Item name', s.item_name)}
-              ${select('Billing type', 'billing_type_'+i, BILLING_TYPES, s.billing_type)}
-              ${field('Total price', s.total_price != null ? money(s.total_price) : '')}
+              ${select('Billing type', BILLING_TYPES, s.billing_type)}
+              ${field('Total price', money(s.total_price))}
             </div>
 
-            <div class="grid" style="margin-top:8px;">
-              ${field('Quantity', s.quantity ?? '')}
+            <div class="grid-3" style="margin-top:8px;">
+              ${field('Quantity', s.quantity ?? 1)}
               ${field('Start date', s.start_date ?? '')}
-              ${field('Months of service', s.months_of_service ?? '')}
+              ${smallField('# periods', s.periods ?? 1)}
             </div>
 
-            <div class="grid" style="margin-top:8px;">
+            <div class="row" style="margin-top:8px;">
+              <div class="row">
+                ${smallField('every', s.frequency_every ?? 1)}
+                ${select('Frequency', FREQ_UNITS, s.frequency_unit ?? 'None')}
+              </div>
+              ${smallField('Net terms', s.net_terms ?? 30)}
+            </div>
+
+            <div class="grid-2" style="margin-top:8px;">
               ${field('Calculated end date', s.calculated_end_date ?? '')}
-              ${field('Net terms', s.net_terms ?? 30)}
-              ${field('Rev-rec category (optional)', s.rev_rec_category ?? '')}
-            </div>
-
-            <div class="grid2" style="margin-top:8px;">
-              ${field('Every (frequency number)', s.frequency_every ?? 1)}
-              ${select('Frequency unit', 'freq_unit_'+i, FREQ_UNITS, s.frequency_unit ?? 'None')}
+              ${field('Calculated subtotal', money(totalValue ?? s.total_price))}
             </div>
 
             ${renderOverage(s)}
 
-            <h3 style="margin-top:12px;">Evidence</h3>
-            ${(s.evidence||[]).slice(0,6).map(ev=>`<div class="muted">p.${ev.page}: ${escapeHtml(String(ev.snippet||'').substring(0,200))}…</div>`).join('')}
+            <div style="margin-top:12px;">
+              <h3 style="margin:0 0 6px;">Evidence</h3>
+              ${(s.evidence||[]).slice(0,6).map(ev => `<div class="evidence-line">p.${ev.page}: ${escapeHtml(String(ev.snippet||'').slice(0,200))}…</div>`).join('')}
+            </div>
 
             <div style="margin-top:12px;">
               <span class="copy" onclick='copyPlan(${JSON.stringify(JSON.stringify(toPlan(s))).replace(/'/g,"&#39;")})'>Copy Garage plan</span>
             </div>
           `;
+
           results.appendChild(card);
         });
       }
 
-      function renderOverage(s) {
-        if (s.billing_type === 'Flat price') return '';
-        const base = `
-          <h3 style="margin-top:12px;">Overage / Usage</h3>
-          <div class="grid">
-            ${field('Event to track', s.event_to_track ?? '')}
-            ${field('Unit label', s.unit_label ?? '')}
-            ${field(s.billing_type === 'Unit price' ? 'Price per unit' : 'Price per unit (if applicable)', s.price_per_unit ?? '')}
-          </div>
-        `;
-        if (Array.isArray(s.tiers) && s.tiers.length) {
-          const rows = s.tiers.map(t=>`
-            <tr>
-              <td>${escapeHtml(t.tier_name ?? '')}</td>
-              <td>${escapeHtml(t.applied_when ?? (t.min_quantity!=null?`>= ${t.min_quantity}`:''))}</td>
-              <td>${t.price!=null ? money(t.price) : ''}</td>
-            </tr>
-          `).join('');
-          return base + `
-            <table>
-              <thead><tr><th>Tier name</th><th>Applied when</th><th>Price</th></tr></thead>
-              <tbody>${rows}</tbody>
-            </table>
-            <div class="muted">Volume-based: ${s.volume_based === true ? 'Yes' : s.volume_based === false ? 'No' : '—'}</div>
-          `;
-        }
-        return base;
+      // ---------- helpers: Garage-ish building blocks ----------
+      function kv(label, value) {
+        return `<div class="fieldset"><span class="label">${label}</span><div class="value">${escapeHtml(value ?? '')}</div></div>`;
+      }
+      function field(label, value){
+        return `<div><span class="label">${label}</span><input value="${value ?? ''}" readonly /></div>`;
+      }
+      function smallField(label, value){
+        return `<div><span class="label">${label}</span><input value="${value ?? ''}" readonly /></div>`;
+      }
+      function select(label, options, value){
+        return `<div><span class="label">${label}</span>
+          <select disabled>${options.map(opt=>`<option ${opt===value?'selected':''}>${opt}</option>`).join('')}</select>
+        </div>`;
+      }
+      function money(n){
+        if (n == null || isNaN(Number(n))) return '';
+        return `$${Number(n).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2})}`;
+      }
+      function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
+      function copyPlan(txt){ navigator.clipboard.writeText(txt).then(()=>alert('Copied! Paste into Garage.')); }
+
+      // ---------- totals & months ----------
+      // Total value: quantity ignored by spec you gave
+      // Recurring (Frequency != "None"): price * periods; One-time: price
+      function computeTotalValue(s) {
+        if (s == null || s.total_price == null) return null;
+        const price = Number(s.total_price);
+        const periods = Number.isFinite(Number(s.periods)) ? Number(s.periods) : 1;
+        const recurring = (s.frequency_unit && s.frequency_unit !== 'None');
+        return recurring ? price * periods : price;
       }
 
+      function deriveMonthsOfService(s) {
+        if (Number.isFinite(Number(s.months_of_service))) return Number(s.months_of_service);
+        // Fallback: derive from start/end when both exist (month difference, floor)
+        if (s.start_date && s.calculated_end_date) {
+          try {
+            const start = new Date(s.start_date);
+            const end = new Date(s.calculated_end_date);
+            const months = (end.getFullYear() - start.getFullYear())*12 + (end.getMonth() - start.getMonth());
+            return Math.max(0, months);
+          } catch {}
+        }
+        return '';
+      }
+
+      // ---------- overage/tiers ----------
+      function renderOverage(s) {
+        if (!s || s.billing_type === 'Flat price') return '';
+        const hasTiers = Array.isArray(s.tiers) && s.tiers.length;
+        const base = `
+          <div class="section-title">TIERS / USAGE</div>
+          <div class="grid-3">
+            ${field('Event to track', s.event_to_track ?? '')}
+            ${field('Unit label', s.unit_label ?? '')}
+            ${field('Price per unit', s.price_per_unit != null ? money(s.price_per_unit) : '')}
+          </div>
+          <div class="muted" style="margin-top:4px;">Price tiers are ${s.volume_based ? 'volume-based' : (s.volume_based === false ? 'not volume-based' : '—')}.</div>
+        `;
+        if (!hasTiers) return base;
+
+        const rows = s.tiers.map(t=>`
+          <tr>
+            <td>${escapeHtml(t.tier_name ?? '')}</td>
+            <td>${escapeHtml(t.applied_when ?? (t.min_quantity!=null?`≥ ${t.min_quantity}`:''))}</td>
+            <td>${t.price!=null ? money(t.price) : ''}</td>
+          </tr>
+        `).join('');
+        return base + `
+          <table style="width:100%; border-collapse:collapse; margin-top:8px;">
+            <thead><tr><th style="text-align:left; border:1px solid #e5e7eb; padding:6px;">Tier name</th><th style="text-align:left; border:1px solid #e5e7eb; padding:6px;">Applied when</th><th style="text-align:left; border:1px solid #e5e7eb; padding:6px;">Price</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        `;
+      }
+
+      // ---------- copy plan mapping ----------
       function toPlan(s){
-        // Only include overage fields when billing type is not Flat price
         const base = {
+          // Header strip
+          service_start_date: s.start_date || '',
+          total_months_of_service: deriveMonthsOfService(s) || '',
+          calculated_service_end_date: s.calculated_end_date || '',
+          rev_rec_category: s.rev_rec_category || '',
+
+          // Item & price
           item_name: s.item_name,
           billing_type: s.billing_type,
           total_price: s.total_price ?? null,
           quantity: s.quantity ?? 1,
           start_date: s.start_date,
-          months_of_service: s.months_of_service ?? null,
+          periods: s.periods ?? 1,
           frequency_every: s.frequency_every ?? 1,
           frequency_unit: s.frequency_unit ?? 'None',
-          periods: s.periods ?? 1,
-          net_terms: s.net_terms ?? 30,
-          calculated_end_date: s.calculated_end_date ?? null,
-          rev_rec_category: s.rev_rec_category ?? null
+          net_terms: s.net_terms ?? 30
         };
+
         if (s.billing_type !== 'Flat price') {
           base.event_to_track = s.event_to_track ?? null;
           base.unit_label = s.unit_label ?? null;
@@ -198,19 +281,6 @@ select[disabled] {
         }
         return base;
       }
-
-      // ---------- helpers ----------
-      function field(label, value){
-        return `<div><label>${label}</label><input value="${value ?? ''}" readonly /></div>`;
-      }
-      function select(label, id, options, value){
-        return `<div><label>${label}</label><select id="${id}" disabled>
-          ${options.map(opt=>`<option ${opt===value?'selected':''}>${opt}</option>`).join('')}
-        </select></div>`;
-      }
-      function money(n){ return `$${Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}` }
-      function copyPlan(txt){ navigator.clipboard.writeText(txt).then(()=>alert('Copied! Paste into Garage.')); }
-      function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
     </script>
   </body>
 </html>
