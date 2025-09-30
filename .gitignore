@@ -2,7 +2,9 @@
 node_modules/
 
 # Environment variables (NEVER commit this!)
-
+.env
+.env.local
+.env.production
 
 # Uploads (temporary files)
 uploads/
