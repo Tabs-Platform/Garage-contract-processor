@@ -7,291 +7,115 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
-      :root {
-        --border:#e5e7eb; --ink:#111827; --muted:#6b7280; --bg:#fff; --card:#fff; --chip:#eef2ff; --chip-ink:#3730a3;
-        --ok:#dcfce7; --ok-ink:#065f46; --warn:#fef3c7; --warn-ink:#92400e; --bad:#fee2e2; --bad-ink:#991b1b;
-      }
-      * { box-sizing: border-box; }
-      body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 24px; color: var(--ink); }
-      h1 { font-size: 22px; margin: 0 0 8px; }
-      h2 { font-size: 16px; margin: 0; letter-spacing: .02em; }
-      .muted { color: var(--muted); font-size: 12px; }
-      .btn { padding:10px 14px; border-radius:12px; border: 1px solid var(--ink); background:var(--ink); color:white; cursor:pointer; font-weight:600; }
-
-      .card { border: 1px solid var(--border); border-radius: 16px; padding: 16px; background: var(--card); box-shadow: 0 4px 8px rgba(0,0,0,.04); margin: 16px 0; }
-
-      /* Garage-like header grid */
-      .sched-header { display:grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 12px; margin-top: 8px; }
-      .fieldset { border:1px solid var(--border); border-radius: 12px; padding: 10px; background: var(--bg); }
-      .label { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 4px; display:block; }
-      .value { font-size: 14px; }
-
-      .section-title { color:#6d28d9; font-weight: 800; letter-spacing:.06em; margin: 16px 0 8px; }
-      .grid-3 { display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
-      .grid-2 { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
-      .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: center; }
-
-      input, select, textarea {
-        width:100%; padding:10px; border:1px solid var(--border); border-radius:10px; font-size:14px; background:#fff; color:var(--ink);
-      }
-      input[readonly], select[disabled] {
-        background:#fff !important; color:var(--ink) !important; opacity:1 !important; -webkit-text-fill-color:var(--ink) !important;
-      }
-
-      .pill { display:inline-block; padding:2px 8px; border-radius:9999px; background:var(--chip); color:var(--chip-ink); font-size:12px; font-weight:600; }
-      .conf-ok { background: var(--ok); color: var(--ok-ink); }
-      .conf-warn { background: var(--warn); color: var(--warn-ink); }
-      .conf-bad { background: var(--bad); color: var(--bad-ink); }
-
-      .copy { cursor:pointer; font-size:12px; color:#2563eb; }
-      .evidence-line { color: var(--muted); font-size:12px; margin-top:4px; }
-
-      /* page header controls */
-      .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-      .toolbar select { height:40px; }
+      body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 24px; background: #f9fafb; }
+      .container { max-width: 1200px; margin: 0 auto; }
+      h1 { font-size: 24px; margin-bottom: 8px; color: #111827; }
+      .muted { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+      .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 16px; background: white; }
+      .upload-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+      label { display:block; font-size:12px; color:#6b7280; margin-bottom:4px; font-weight: 600; text-transform: uppercase; }
+      input, select { width:100%; padding:10px; border:1px solid #e5e7eb; border-radius:8px; font-size:14px; }
+      .btn { padding:12px 20px; border-radius:8px; border: none; background:#2563eb; color:white; cursor:pointer; font-weight:600; font-size: 14px; }
+      .btn:hover { background:#1d4ed8; }
+      #status { margin-top:12px; padding:12px; background:#eff6ff; border-radius:8px; color:#1e40af; font-size:14px; }
+      .schedule-card { border-left: 4px solid #2563eb; }
+      .schedule-card h2 { font-size: 18px; margin: 0 0 12px 0; color: #111827; }
+      .field-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 12px; }
+      .field { }
+      .field-label { font-size: 11px; color: #6b7280; text-transform: uppercase; font-weight: 600; margin-bottom: 2px; }
+      .field-value { font-size: 14px; color: #111827; font-weight: 500; }
     </style>
   </head>
   <body>
-    <h1>Garage Contract → Revenue Schedules</h1>
-    <p class="muted">Upload a PDF → get copy-ready schedules that mirror Garage.</p>
+    <div class="container">
+      <h1>🚗 Garage Contract Assistant</h1>
+      <p class="muted">Upload a contract PDF to extract revenue schedules automatically.</p>
 
-    <div class="card">
-      <form id="uploadForm">
-        <div class="toolbar">
-          <input type="file" id="file" name="file" accept="application/pdf" required />
-          <select id="model">
-            <option value="o3" selected>o3</option>
-            <option value="o4-mini">o4-mini</option>
-            <option value="gpt-4o-mini">gpt-4o-mini</option>
-            <option value="o3-mini">o3-mini</option>
-          </select>
-          <select id="forceMulti">
-            <option value="auto" selected>Auto multi</option>
-            <option value="on">Force multi</option>
-            <option value="off">Single only</option>
-          </select>
-          <button class="btn" type="submit">Analyze</button>
-        </div>
-      </form>
-      <div id="status" class="muted" style="margin-top:8px;"></div>
+      <div class="card">
+        <form id="uploadForm">
+          <div class="upload-form">
+            <div>
+              <label>Contract PDF</label>
+              <input type="file" id="file" accept="application/pdf" required />
+            </div>
+            <div>
+              <label>AI Model</label>
+              <select id="model">
+                <option value="gpt-4o-mini">GPT-4o Mini (Fast & Cheap)</option>
+                <option value="gpt-4o">GPT-4o (Best Quality)</option>
+              </select>
+            </div>
+          </div>
+          <button class="btn" type="submit">📄 Analyze Contract</button>
+        </form>
+        <div id="status" style="display:none;"></div>
+      </div>
+
+      <div id="results"></div>
     </div>
 
-    <div id="results"></div>
-
     <script>
-      const BILLING_TYPES = ['Flat price','Unit price','Tier flat price','Tier unit price'];
-      const FREQ_UNITS = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year(s)'];
-
       const $ = (s) => document.querySelector(s);
       const results = $('#results');
       const status = $('#status');
 
-      // ---------- upload & call ----------
       $('#uploadForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         results.innerHTML = '';
-        status.textContent = 'Uploading & extracting…';
+        status.style.display = 'block';
+        status.textContent = '⏳ Uploading and analyzing contract...';
+        
         const fd = new FormData();
         fd.append('file', $('#file').files[0]);
-        const qs = new URLSearchParams({ model: $('#model').value, forceMulti: $('#forceMulti').value }).toString();
+        const model = $('#model').value;
+        
         try {
-          const res = await fetch('/api/extract?' + qs, { method: 'POST', body: fd });
+          const res = await fetch(`/api/extract?model=${model}`, { 
+            method: 'POST', 
+            body: fd 
+          });
           
-          // Check if response is JSON
-          const contentType = res.headers.get('content-type');
-          if (!contentType || !contentType.includes('application/json')) {
+          if (!res.ok) {
             const text = await res.text();
-            throw new Error(`Server error (non-JSON response): ${text.substring(0, 200)}`);
+            throw new Error(`Server error: ${text}`);
           }
           
           const json = await res.json();
-          if (!res.ok) {
-            const errMsg = json.error || json.debug?.message || 'Request failed';
-            throw new Error(errMsg);
-          }
-          status.textContent = `Found ${json.schedules.length} schedule(s).`;
+          status.textContent = `✅ Found ${json.schedules.length} schedule(s)`;
           render(json);
         } catch (err) {
-          status.textContent = 'Error: ' + err.message;
-          console.error('Upload error:', err);
+          status.textContent = '❌ Error: ' + err.message;
+          console.error('Error:', err);
         }
       });
 
-      // ---------- render ----------
       function render(data) {
         (data.schedules || []).forEach((s, i) => {
-          const conf = s.overall_confidence ?? 0.7;
-          const confClass = conf >= 0.85 ? 'conf-ok' : (conf < 0.6 ? 'conf-bad' : 'conf-warn');
-          const totalValue = computeTotalValue(s);
-          const months = deriveMonthsOfService(s);
-
           const card = document.createElement('div');
-          card.className = 'card';
-
-          // header strip like Garage
+          card.className = 'card schedule-card';
           card.innerHTML = `
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-              <h2>REVENUE SCHEDULE ${i+1}</h2>
-              <span class="pill ${confClass}">Confidence ${Math.round(conf*100)}%</span>
-            </div>
-
-            <div class="sched-header">
-              ${kv('Service start date', s.start_date || '')}
-              ${kv('Total months of service', months ?? '')}
-              ${kv('Calculated service end date', s.calculated_end_date || '')}
-              ${kv('Category for rev rec (optional)', s.rev_rec_category || '')}
-              ${kv('Total value', totalValue != null ? money(totalValue) : '')}
-            </div>
-
-            <div class="section-title">ITEM 1 AND PRICE</div>
-
-            <div class="grid-3">
-              ${field('Item name', s.item_name)}
-              ${select('Billing type', BILLING_TYPES, s.billing_type)}
-              ${field('Total price', money(s.total_price))}
-            </div>
-
-            <div class="grid-3" style="margin-top:8px;">
-              ${field('Quantity', s.quantity ?? 1)}
-              ${field('Start date', s.start_date ?? '')}
-              ${smallField('# periods', s.periods ?? 1)}
-            </div>
-
-            <div class="row" style="margin-top:8px;">
-              <div class="row">
-                ${smallField('every', s.frequency_every ?? 1)}
-                ${select('Frequency', FREQ_UNITS, s.frequency_unit ?? 'None')}
+            <h2>Schedule ${i + 1}: ${escapeHtml(s.item_name || 'Unnamed')}</h2>
+            <div class="field-grid">
+              <div class="field">
+                <div class="field-label">Total Price</div>
+                <div class="field-value">$${Number(s.total_price || 0).toLocaleString('en-US', {minimumFractionDigits: 2})}</div>
               </div>
-              ${smallField('Net terms', s.net_terms ?? 30)}
-            </div>
-
-            <div class="grid-2" style="margin-top:8px;">
-              ${field('Calculated end date', s.calculated_end_date ?? '')}
-              ${field('Calculated subtotal', money(totalValue ?? s.total_price))}
-            </div>
-
-            ${renderOverage(s)}
-
-            <div style="margin-top:12px;">
-              <h3 style="margin:0 0 6px;">Evidence</h3>
-              ${(s.evidence||[]).slice(0,6).map(ev => `<div class="evidence-line">p.${ev.page}: ${escapeHtml(String(ev.snippet||'').slice(0,200))}…</div>`).join('')}
-            </div>
-
-            <div style="margin-top:12px;">
-              <span class="copy" onclick='copyPlan(${JSON.stringify(JSON.stringify(toPlan(s))).replace(/'/g,"&#39;")})'>Copy Garage plan</span>
+              <div class="field">
+                <div class="field-label">Start Date</div>
+                <div class="field-value">${escapeHtml(s.start_date || 'N/A')}</div>
+              </div>
+              <div class="field">
+                <div class="field-label">Billing Type</div>
+                <div class="field-value">${escapeHtml(s.billing_type || 'N/A')}</div>
+              </div>
             </div>
           `;
-
           results.appendChild(card);
         });
       }
 
-      // ---------- helpers: Garage-ish building blocks ----------
-      function kv(label, value) {
-        return `<div class="fieldset"><span class="label">${label}</span><div class="value">${escapeHtml(value ?? '')}</div></div>`;
-      }
-      function field(label, value){
-        return `<div><span class="label">${label}</span><input value="${value ?? ''}" readonly /></div>`;
-      }
-      function smallField(label, value){
-        return `<div><span class="label">${label}</span><input value="${value ?? ''}" readonly /></div>`;
-      }
-      function select(label, options, value){
-        return `<div><span class="label">${label}</span>
-          <select disabled>${options.map(opt=>`<option ${opt===value?'selected':''}>${opt}</option>`).join('')}</select>
-        </div>`;
-      }
-      function money(n){
-        if (n == null || isNaN(Number(n))) return '';
-        return `$${Number(n).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2})}`;
-      }
-      function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
-      function copyPlan(txt){ navigator.clipboard.writeText(txt).then(()=>alert('Copied! Paste into Garage.')); }
-
-      // ---------- totals & months ----------
-      // Total value: quantity ignored by spec you gave
-      // Recurring (Frequency != "None"): price * periods; One-time: price
-      function computeTotalValue(s) {
-        if (s == null || s.total_price == null) return null;
-        const price = Number(s.total_price);
-        const periods = Number.isFinite(Number(s.periods)) ? Number(s.periods) : 1;
-        const recurring = (s.frequency_unit && s.frequency_unit !== 'None');
-        return recurring ? price * periods : price;
-      }
-
-      function deriveMonthsOfService(s) {
-        if (Number.isFinite(Number(s.months_of_service))) return Number(s.months_of_service);
-        // Fallback: derive from start/end when both exist (month difference, floor)
-        if (s.start_date && s.calculated_end_date) {
-          try {
-            const start = new Date(s.start_date);
-            const end = new Date(s.calculated_end_date);
-            const months = (end.getFullYear() - start.getFullYear())*12 + (end.getMonth() - start.getMonth());
-            return Math.max(0, months);
-          } catch {}
-        }
-        return '';
-      }
-
-      // ---------- overage/tiers ----------
-      function renderOverage(s) {
-        if (!s || s.billing_type === 'Flat price') return '';
-        const hasTiers = Array.isArray(s.tiers) && s.tiers.length;
-        const base = `
-          <div class="section-title">TIERS / USAGE</div>
-          <div class="grid-3">
-            ${field('Event to track', s.event_to_track ?? '')}
-            ${field('Unit label', s.unit_label ?? '')}
-            ${field('Price per unit', s.price_per_unit != null ? money(s.price_per_unit) : '')}
-          </div>
-          <div class="muted" style="margin-top:4px;">Price tiers are ${s.volume_based ? 'volume-based' : (s.volume_based === false ? 'not volume-based' : '—')}.</div>
-        `;
-        if (!hasTiers) return base;
-
-        const rows = s.tiers.map(t=>`
-          <tr>
-            <td>${escapeHtml(t.tier_name ?? '')}</td>
-            <td>${escapeHtml(t.applied_when ?? (t.min_quantity!=null?`≥ ${t.min_quantity}`:''))}</td>
-            <td>${t.price!=null ? money(t.price) : ''}</td>
-          </tr>
-        `).join('');
-        return base + `
-          <table style="width:100%; border-collapse:collapse; margin-top:8px;">
-            <thead><tr><th style="text-align:left; border:1px solid #e5e7eb; padding:6px;">Tier name</th><th style="text-align:left; border:1px solid #e5e7eb; padding:6px;">Applied when</th><th style="text-align:left; border:1px solid #e5e7eb; padding:6px;">Price</th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        `;
-      }
-
-      // ---------- copy plan mapping ----------
-      function toPlan(s){
-        const base = {
-          // Header strip
-          service_start_date: s.start_date || '',
-          total_months_of_service: deriveMonthsOfService(s) || '',
-          calculated_service_end_date: s.calculated_end_date || '',
-          rev_rec_category: s.rev_rec_category || '',
-
-          // Item & price
-          item_name: s.item_name,
-          billing_type: s.billing_type,
-          total_price: s.total_price ?? null,
-          quantity: s.quantity ?? 1,
-          start_date: s.start_date,
-          periods: s.periods ?? 1,
-          frequency_every: s.frequency_every ?? 1,
-          frequency_unit: s.frequency_unit ?? 'None',
-          net_terms: s.net_terms ?? 30
-        };
-
-        if (s.billing_type !== 'Flat price') {
-          base.event_to_track = s.event_to_track ?? null;
-          base.unit_label = s.unit_label ?? null;
-          base.price_per_unit = s.price_per_unit ?? null;
-          base.volume_based = s.volume_based ?? null;
-          base.tiers = Array.isArray(s.tiers) ? s.tiers : [];
-        }
-        return base;
+      function escapeHtml(s) {
+        return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
       }
     </script>
   </body>
