@@ -96,12 +96,24 @@
         const qs = new URLSearchParams({ model: $('#model').value, forceMulti: $('#forceMulti').value }).toString();
         try {
           const res = await fetch('/api/extract?' + qs, { method: 'POST', body: fd });
+          
+          // Check if response is JSON
+          const contentType = res.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+            const text = await res.text();
+            throw new Error(`Server error (non-JSON response): ${text.substring(0, 200)}`);
+          }
+          
           const json = await res.json();
-          if (!res.ok) throw new Error(json.error || 'Request failed');
+          if (!res.ok) {
+            const errMsg = json.error || json.debug?.message || 'Request failed';
+            throw new Error(errMsg);
+          }
           status.textContent = `Found ${json.schedules.length} schedule(s).`;
           render(json);
         } catch (err) {
           status.textContent = 'Error: ' + err.message;
+          console.error('Upload error:', err);
         }
       });
 
