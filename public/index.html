@@ -6,6 +6,7 @@
     <title>Garage Contract → Revenue Schedules</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+
     <style>
       :root {
         --border:#e5e7eb; --ink:#111827; --muted:#6b7280; --bg:#fff; --card:#fff; --chip:#eef2ff; --chip-ink:#3730a3;
@@ -101,124 +102,192 @@
           status.textContent = `Found ${json.schedules.length} schedule(s).`;
           render(json);
         } catch (err) {
-          status.textContent = 'Error: ' + err.message;
+          // If render throws later, we’ll also catch per-schedule below
+          status.textContent = 'Error: ' + (err?.message || String(err));
         }
       });
 
       // ---------- render ----------
       function render(data) {
         (data.schedules || []).forEach((s, i) => {
-          const conf = s.overall_confidence ?? 0.7;
-          const confClass = conf >= 0.85 ? 'conf-ok' : (conf < 0.6 ? 'conf-bad' : 'conf-warn');
-          const totalValue = computeTotalValue(s);
-          const months = deriveMonthsOfService(s);
+          try {
+            const conf = s.overall_confidence ?? 0.7;
+            const confClass = conf >= 0.85 ? 'conf-ok' : (conf < 0.6 ? 'conf-bad' : 'conf-warn');
 
-          const card = document.createElement('div');
-          card.className = 'card';
+            // Fallbacks (if the model didn’t include them)
+            const months = deriveMonthsOfService(s);
+            const endDate = computeCalculatedEndDate(s) || s.calculated_end_date || '';
+            const totalValue = computeTotalValue(s);
 
-          // header strip like Garage
-          card.innerHTML = `
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-              <h2>REVENUE SCHEDULE ${i+1}</h2>
-              <span class="pill ${confClass}">Confidence ${Math.round(conf*100)}%</span>
-            </div>
+            const card = document.createElement('div');
+            card.className = 'card';
 
-            <div class="sched-header">
-              ${kv('Service start date', s.start_date || '')}
-              ${kv('Total months of service', months ?? '')}
-              ${kv('Calculated service end date', s.calculated_end_date || '')}
-              ${kv('Category for rev rec (optional)', s.rev_rec_category || '')}
-              ${kv('Total value', totalValue != null ? money(totalValue) : '')}
-            </div>
-
-            <div class="section-title">ITEM 1 AND PRICE</div>
-
-            <div class="grid-3">
-              ${field('Item name', s.item_name)}
-              ${select('Billing type', BILLING_TYPES, s.billing_type)}
-              ${field('Total price', money(s.total_price))}
-            </div>
-
-            <div class="grid-3" style="margin-top:8px;">
-              ${field('Quantity', s.quantity ?? 1)}
-              ${field('Start date', s.start_date ?? '')}
-              ${smallField('# periods', s.periods ?? 1)}
-            </div>
-
-            <div class="row" style="margin-top:8px;">
-              <div class="row">
-                ${smallField('every', s.frequency_every ?? 1)}
-                ${select('Frequency', FREQ_UNITS, s.frequency_unit ?? 'None')}
+            // header strip like Garage
+            card.innerHTML = `
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <h2>REVENUE SCHEDULE ${i+1}</h2>
+                <span class="pill ${confClass}">Confidence ${Math.round(conf*100)}%</span>
               </div>
-              ${smallField('Net terms', s.net_terms ?? 30)}
-            </div>
 
-            <div class="grid-2" style="margin-top:8px;">
-              ${field('Calculated end date', s.calculated_end_date ?? '')}
-              ${field('Calculated subtotal', money(totalValue ?? s.total_price))}
-            </div>
+              <div class="sched-header">
+                ${kv('Service start date', s.start_date || '')}
+                ${kv('Total months of service', months ?? '')}
+                ${kv('Calculated service end date', endDate || '')}
+                ${kv('Category for rev rec (optional)', s.rev_rec_category || '')}
+                ${kv('Total value', totalValue != null ? money(totalValue) : '')}
+              </div>
 
-            ${renderOverage(s)}
+              <div class="section-title">ITEM 1 AND PRICE</div>
 
-            <div style="margin-top:12px;">
-              <h3 style="margin:0 0 6px;">Evidence</h3>
-              ${(s.evidence||[]).slice(0,6).map(ev => `<div class="evidence-line">p.${ev.page}: ${escapeHtml(String(ev.snippet||'').slice(0,200))}…</div>`).join('')}
-            </div>
+              <div class="grid-3">
+                ${field('Item name', s.item_name)}
+                ${select('Billing type', BILLING_TYPES, s.billing_type)}
+                ${field('Total price', money(s.total_price))}
+              </div>
 
-            <div style="margin-top:12px;">
-              <span class="copy" onclick='copyPlan(${JSON.stringify(JSON.stringify(toPlan(s))).replace(/'/g,"&#39;")})'>Copy Garage plan</span>
-            </div>
-          `;
+              <div class="grid-3" style="margin-top:8px;">
+                ${field('Quantity', s.quantity ?? 1)}
+                ${field('Start date', s.start_date ?? '')}
+                ${smallField('# periods', s.periods ?? 1)}
+              </div>
 
-          results.appendChild(card);
+              <div class="row" style="margin-top:8px;">
+                <div class="row">
+                  ${smallField('every', s.frequency_every ?? 1)}
+                  ${select('Frequency', FREQ_UNITS, s.frequency_unit ?? 'None')}
+                </div>
+                ${smallField('Net terms', s.net_terms ?? 30)}
+              </div>
+
+              <div class="grid-2" style="margin-top:8px;">
+                ${field('Calculated end date', endDate || '')}
+                ${field('Calculated subtotal', money(totalValue ?? s.total_price))}
+              </div>
+
+              ${renderOverage(s)}
+
+              <div style="margin-top:12px;">
+                <h3 style="margin:0 0 6px;">Evidence</h3>
+                ${(s.evidence||[]).slice(0,6).map(ev => `<div class="evidence-line">p.${safe(ev?.page)}: ${escapeHtml(safe(ev?.snippet)).slice(0,200)}…</div>`).join('')}
+              </div>
+
+              ${Array.isArray(s.issues) && s.issues.length ? `<div style="margin-top:10px;" class="muted">${s.issues.map(x=>`• ${escapeHtml(safe(x))}`).join('<br/>')}</div>` : ''}
+
+              <div style="margin-top:12px;">
+                <span class="copy" onclick='copyPlan(${JSON.stringify(JSON.stringify(toPlan({...s, calculated_end_date:endDate}))).replace(/'/g,"&#39;")})'>Copy Garage plan</span>
+              </div>
+            `;
+
+            results.appendChild(card);
+          } catch (e) {
+            console.error('Render error on schedule', i+1, e);
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.innerHTML = `<div class="muted">Render error on schedule ${i+1}: ${escapeHtml(safe(e?.message))}</div>`;
+            results.appendChild(card);
+          }
         });
       }
 
       // ---------- helpers: Garage-ish building blocks ----------
       function kv(label, value) {
-        return `<div class="fieldset"><span class="label">${label}</span><div class="value">${escapeHtml(value ?? '')}</div></div>`;
+        return `<div class="fieldset"><span class="label">${escapeHtml(label)}</span><div class="value">${escapeHtml(safe(value))}</div></div>`;
       }
       function field(label, value){
-        return `<div><span class="label">${label}</span><input value="${value ?? ''}" readonly /></div>`;
+        return `<div><span class="label">${escapeHtml(label)}</span><input value="${escapeHtml(safe(value))}" readonly /></div>`;
       }
       function smallField(label, value){
-        return `<div><span class="label">${label}</span><input value="${value ?? ''}" readonly /></div>`;
+        return `<div><span class="label">${escapeHtml(label)}</span><input value="${escapeHtml(safe(value))}" readonly /></div>`;
       }
       function select(label, options, value){
-        return `<div><span class="label">${label}</span>
-          <select disabled>${options.map(opt=>`<option ${opt===value?'selected':''}>${opt}</option>`).join('')}</select>
+        return `<div><span class="label">${escapeHtml(label)}</span>
+          <select disabled>${options.map(opt=>`<option ${opt===value?'selected':''}>${escapeHtml(opt)}</option>`).join('')}</select>
         </div>`;
       }
       function money(n){
-        if (n == null || isNaN(Number(n))) return '';
-        return `$${Number(n).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2})}`;
+        const num = Number(n);
+        if (!Number.isFinite(num)) return '';
+        return `$${num.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2})}`;
       }
-      function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
+
+      // SAFETY: always coerce to string before replace()
+      function escapeHtml(s){
+        const str = s === null || s === undefined ? '' : String(s);
+        return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+      }
+      function safe(v){ return v === null || v === undefined ? '' : v; }
       function copyPlan(txt){ navigator.clipboard.writeText(txt).then(()=>alert('Copied! Paste into Garage.')); }
 
-      // ---------- totals & months ----------
-      // Total value: quantity ignored by spec you gave
+      // ---------- totals & dates ----------
+      // Total value: quantity ignored (per your rule)
       // Recurring (Frequency != "None"): price * periods; One-time: price
       function computeTotalValue(s) {
-        if (s == null || s.total_price == null) return null;
-        const price = Number(s.total_price);
-        const periods = Number.isFinite(Number(s.periods)) ? Number(s.periods) : 1;
-        const recurring = (s.frequency_unit && s.frequency_unit !== 'None');
+        const price = Number(s?.total_price);
+        if (!Number.isFinite(price)) return null;
+        const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
+        const recurring = (s?.frequency_unit && s.frequency_unit !== 'None');
         return recurring ? price * periods : price;
       }
 
+      // Derive months if not provided
       function deriveMonthsOfService(s) {
-        if (Number.isFinite(Number(s.months_of_service))) return Number(s.months_of_service);
-        // Fallback: derive from start/end when both exist (month difference, floor)
-        if (s.start_date && s.calculated_end_date) {
-          try {
-            const start = new Date(s.start_date);
-            const end = new Date(s.calculated_end_date);
-            const months = (end.getFullYear() - start.getFullYear())*12 + (end.getMonth() - start.getMonth());
-            return Math.max(0, months);
-          } catch {}
-        }
+        if (Number.isFinite(Number(s?.months_of_service))) return Number(s.months_of_service);
+        const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
+        const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
+        const unit = s?.frequency_unit;
+        if (!unit || unit === 'None') return 0;
+
+        if (unit === 'Month(s)') return every * periods;
+        if (unit === 'Year(s)')  return 12 * every * periods;
+        if (unit === 'Week(s)')  return Math.round((7 * every * periods) / 30);
+        if (unit === 'Day(s)')   return Math.round((every * periods) / 30);
+        if (unit === 'Semi_month(s)') return Math.round((15 * every * periods) / 30);
         return '';
+      }
+
+      // Compute end date if missing: start + (every × periods × unit)
+      function computeCalculatedEndDate(s) {
+        if (s?.calculated_end_date) return s.calculated_end_date;
+        const startStr = s?.start_date;
+        const unit = s?.frequency_unit;
+        if (!startStr || !unit) return '';
+
+        const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
+        const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
+        const total = every * periods;
+
+        try {
+          const start = new Date(startStr);
+          if (unit === 'None') return formatDate(start);
+
+          if (unit === 'Month(s)') return formatDate(addMonths(start, total));
+          if (unit === 'Year(s)')  return formatDate(addMonths(start, total * 12));
+          if (unit === 'Week(s)')  return formatDate(addDays(start, total * 7));
+          if (unit === 'Day(s)')   return formatDate(addDays(start, total));
+          if (unit === 'Semi_month(s)') return formatDate(addDays(start, total * 15));
+          return '';
+        } catch { return ''; }
+      }
+
+      function addDays(date, days) {
+        const d = new Date(date.getTime());
+        d.setDate(d.getDate() + days);
+        return d;
+      }
+      function addMonths(date, months) {
+        const d = new Date(date.getTime());
+        const day = d.getDate();
+        d.setDate(1);
+        d.setMonth(d.getMonth() + months);
+        const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+        d.setDate(Math.min(day, last));
+        return d;
+      }
+      function formatDate(d) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth()+1).padStart(2,'0');
+        const da = String(d.getDate()).padStart(2,'0');
+        return `${y}-${m}-${da}`;
       }
 
       // ---------- overage/tiers ----------
@@ -238,9 +307,9 @@
 
         const rows = s.tiers.map(t=>`
           <tr>
-            <td>${escapeHtml(t.tier_name ?? '')}</td>
-            <td>${escapeHtml(t.applied_when ?? (t.min_quantity!=null?`≥ ${t.min_quantity}`:''))}</td>
-            <td>${t.price!=null ? money(t.price) : ''}</td>
+            <td>${escapeHtml(safe(t?.tier_name))}</td>
+            <td>${escapeHtml(safe(t?.applied_when) || (Number.isFinite(Number(t?.min_quantity)) ? '≥ ' + t.min_quantity : ''))}</td>
+            <td>${Number.isFinite(Number(t?.price)) ? money(t.price) : ''}</td>
           </tr>
         `).join('');
         return base + `
@@ -257,7 +326,7 @@
           // Header strip
           service_start_date: s.start_date || '',
           total_months_of_service: deriveMonthsOfService(s) || '',
-          calculated_service_end_date: s.calculated_end_date || '',
+          calculated_service_end_date: computeCalculatedEndDate(s) || s.calculated_end_date || '',
           rev_rec_category: s.rev_rec_category || '',
 
           // Item & price
