@@ -13,6 +13,8 @@ const __dirname = path.dirname(__filename);
 const app = express();
 // Use /tmp for Vercel serverless (only writable directory in production)
 const uploadDir = process.env.NODE_ENV === 'production' ? '/tmp/uploads/' : 'uploads/';
+// Make sure the upload directory exists (especially in serverless)
+try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
 const upload = multer({ dest: uploadDir });
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PORT = process.env.PORT || 3000;
@@ -205,8 +207,9 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
   });
 
   try {
-    const { model = 'o3', forceMulti = 'auto' } = req.query;
-    const chosenModel = ['o3','o4-mini','gpt-4o-mini','o3-mini'].includes(model) ? model : 'o3';
+    const { model = 'gpt-4o-mini', forceMulti = 'auto' } = req.query;
+    const allowed = ['gpt-4o-mini','o4-mini','o3','o3-mini'];
+    const chosenModel = allowed.includes(model) ? model : 'gpt-4o-mini';
 
     // 1) Upload PDF to Files API with a proper name
     const uploaded = await client.files.create({
@@ -214,7 +217,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
         fs.createReadStream(req.file.path),
         req.file.originalname || 'contract.pdf'
       ),
-      purpose: 'assistants'
+      purpose: 'user_data'
     });
     console.log('OpenAI file_id:', uploaded.id);
 
@@ -337,14 +340,12 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
     const debug = {
       message: err?.message,
       status: err?.status,
-      name: err?.name,
       type: err?.type,
       code: err?.code,
-      request_id: err?.headers?.['x-request-id'],
-      data: err?.error ?? err?.response?.data ?? err?.response_body ?? null
+      data: err?.response?.data, // some libs attach server JSON here
     };
-    console.error('OpenAI error:', JSON.stringify(debug, null, 2));
-    res.status(500).json({ error: 'Extraction failed', debug });
+    console.error('OpenAI error:', debug);
+    res.status(err?.status || 500).json({ error: 'Extraction failed', debug });
   } finally {
     fs.unlink(req.file.path, () => {});
   }
