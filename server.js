@@ -20,6 +20,38 @@ const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '5mb' }));
 
+// Health check endpoint
+app.get('/api/health', async (req, res) => {
+  try {
+    const hasKey = !!process.env.OPENAI_API_KEY;
+    const keyPrefix = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.substring(0, 10) + '...' : 'NOT_SET';
+    
+    // Test OpenAI connection
+    let modelsOk = false;
+    try {
+      const models = await client.models.list();
+      modelsOk = models.data && models.data.length > 0;
+    } catch (e) {
+      console.error('OpenAI connection test failed:', e.message);
+    }
+    
+    res.json({
+      status: 'ok',
+      hasApiKey: hasKey,
+      keyPrefix,
+      openaiConnected: modelsOk,
+      nodeEnv: process.env.NODE_ENV,
+      uploadDir
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: err.message,
+      hasApiKey: !!process.env.OPENAI_API_KEY
+    });
+  }
+});
+
 // ---------------- Enums that exactly match Garage ----------------
 const BILLING_TYPES = [
   'Flat price',
