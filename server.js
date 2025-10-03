@@ -14,8 +14,19 @@ const app = express();
 // Use /tmp for Vercel serverless (only writable directory in production)
 const uploadDir = process.env.NODE_ENV === 'production' ? '/tmp/uploads/' : 'uploads/';
 const upload = multer({ dest: uploadDir });
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PORT = process.env.PORT || 3000;
+
+// Initialize OpenAI client lazily (for Vercel serverless)
+let client;
+function getClient() {
+  if (!client) {
+    if (!process.env.OPENAI_API_KEY) {
+      throw new Error('OPENAI_API_KEY is not set');
+    }
+    client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return client;
+}
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '5mb' }));
@@ -29,7 +40,7 @@ app.get('/api/health', async (req, res) => {
     // Test OpenAI connection
     let modelsOk = false;
     try {
-      const models = await client.models.list();
+      const models = await getClient().models.list();
       modelsOk = models.data && models.data.length > 0;
     } catch (e) {
       console.error('OpenAI connection test failed:', e.message);
@@ -219,7 +230,7 @@ Rules:
 // ---------------- Health endpoint ----------------
 app.get('/health', async (_req, res) => {
   try {
-    const models = await client.models.list();
+    const models = await getClient().models.list();
     res.json({ ok: true, models: models.data.slice(0, 3).map(m => m.id) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -241,7 +252,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
     const chosenModel = ['o3','o4-mini','gpt-4o-mini','o3-mini'].includes(model) ? model : 'o3';
 
     // 1) Upload PDF to Files API with a proper name
-    const uploaded = await client.files.create({
+    const uploaded = await getClient().files.create({
       file: await toFile(
         fs.createReadStream(req.file.path),
         req.file.originalname || 'contract.pdf'
@@ -251,7 +262,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
     console.log('OpenAI file_id:', uploaded.id);
 
     // 2) Ask the model for a plain JSON object
-    const response = await client.responses.create({
+    const response = await getClient().responses.create({
       model: chosenModel,
       input: [
         { role: 'system', content: buildSystemPrompt(forceMulti) },
