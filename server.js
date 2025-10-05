@@ -194,164 +194,157 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-async function extractContractFromPDF(filePath, model = 'o3', forceMulti = 'auto') {
-  // 1️⃣ Upload file to OpenAI
-  const uploaded = await client.files.create({
-    file: await toFile(fs.createReadStream(filePath), path.basename(filePath)),
-    purpose: 'assistants'
-  });
-
-  // 2️⃣ Run the model
-  const response = await client.responses.create({
-    model,
-    input: [
-      { role: 'system', content: buildSystemPrompt(forceMulti) },
-      {
-        role: 'user',
-        content: [
-          { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
-          { type: 'input_file', file_id: uploaded.id }
-        ]
-      }
-    ],
-    text: { format: { type: 'json_object' } }
-  });
-
-  // 3️⃣ Parse raw response
-  const raw = response.output_text ?? JSON.stringify(response);
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    const a = raw.indexOf('{'); const b = raw.lastIndexOf('}');
-    data = a >= 0 && b > a ? JSON.parse(raw.slice(a, b + 1)) : { schedules: [], issues: [`Could not parse model JSON`] };
-  }
-
-  // 4️⃣ Normalize schedules (copy from existing /api/extract)
-  const schedules = Array.isArray(data.schedules) ? data.schedules : [];
-  const normalized = schedules.map((s) => {
-    const issues = Array.isArray(s.issues) ? [...s.issues] : [];
-    const bt = clampEnum(
-      normalizeBillingType(s.billing_type, s),
-      BILLING_TYPES,
-      'Flat price'
-    );
-
-    const { every, unit } = normalizeFrequency(
-      s.frequency,
-      s.frequency_every,
-      s.frequency_unit,
-      'None'
-    );
-
-    let qty = pickNumber(s.quantity, null);
-    if (bt === 'Flat price') {
-      if (qty == null || qty > 1) {
-        const desc = `${s.description || ''} ${s.item_name || ''}`.toLowerCase();
-        const looksLikePerUnitMention = /\bx\s*\d+\b|\b\d+\s*(seats?|licenses?|users?)\b/.test(desc);
-        if (qty !== 1) {
-          issues.push(
-            `Quantity normalized to 1 for Flat price (model suggested "${qty}"${looksLikePerUnitMention ? ' based on descriptive copy' : ''}).`
-          );
-        }
-        qty = 1;
-      }
-    }
-
-    const out = {
-      schedule_label: s.schedule_label ?? null,
-      item_name: String(s.item_name || '').trim(),
-      description: s.description ?? null,
-      billing_type: bt,
-      total_price: pickNumber(s.total_price, null),
-      quantity: qty,
-      start_date: s.start_date || null,
-
-      frequency_every: pickNumber(every, 1),
-      frequency_unit: clampEnum(unit, FREQ_UNITS, 'None'),
-
-      months_of_service: pickNumber(s.months_of_service, null),
-      periods: pickNumber(s.periods, 1),
-      calculated_end_date: s.calculated_end_date || null,
-      net_terms: pickNumber(s.net_terms, 30),
-      rev_rec_category: s.rev_rec_category ?? null,
-
-      event_to_track: s.event_to_track ?? null,
-      unit_label: s.unit_label ?? null,
-      price_per_unit: pickNumber(s.price_per_unit, null),
-      volume_based: typeof s.volume_based === 'boolean' ? s.volume_based : null,
-      tiers: Array.isArray(s.tiers)
-        ? s.tiers.map(t => ({
-            tier_name: t.tier_name ?? null,
-            price: pickNumber(t.price, null),
-            applied_when: t.applied_when ?? null,
-            min_quantity: pickNumber(t.min_quantity, null)
-          }))
-        : [],
-
-      evidence: Array.isArray(s.evidence) ? s.evidence.slice(0, 8) : [],
-      confidences: s.confidences || {},
-      overall_confidence: pickNumber(s.overall_confidence, 0.7),
-      issues
-    };
-
-    out.total_value = computeTotalValue(out);
-    if (out.total_value == null && (out.billing_type.includes('Tier') || (out.tiers||[]).length)) {
-      out.issues.push('Total value not computed for tiered pricing (depends on actual usage).');
-    }
-    return out;
-  });
-
-  return {
-    model_used: model,
-    schedules: normalized,
-    model_recommendations: data.model_recommendations ?? null,
-    issues: Array.isArray(data.issues) ? data.issues : [],
-    totals_check: data.totals_check ?? null
-  };
-}
-
-// ---------------- Enter extraction endpoint ----------------
-import fetch from 'node-fetch'; 
-
-app.get('/api/use-contract-assistant', async (req, res) => {
-  const { contractID, model = 'o3', forceMulti = 'auto' } = req.query;
-  if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
-
-  try {
-    console.log(`process.env.LUXURY_PRESENCE_TABS_SANDBOX_API_KEY: ${process.env.LUXURY_PRESENCE_TABS_SANDBOX_API_KEY}`);
-    const pdfResp = await fetch(`https://integrators.prod.api.tabsplatform.com/v3/contracts/${contractID}/file`, {
-      headers: {
-        'accept': 'application/pdf',
-        'Authorization': `${process.env.LUXURY_PRESENCE_TABS_SANDBOX_API_KEY}`
-      }
-    });
-    if (!pdfResp.ok) throw new Error(`Failed to fetch PDF: ${pdfResp.status}`);
-
-    const tempPath = `/tmp/${contractID}.pdf`;
-    const buf = Buffer.from(await pdfResp.arrayBuffer());
-    await fs.promises.writeFile(tempPath, buf);
-
-    const result = await extractContractFromPDF(tempPath, model, forceMulti);
-    res.json(result);
-
-    fs.unlink(tempPath, () => {});
-  } catch (err) {
-    console.error('use-contract-assistant error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ---------------- Main extraction endpoint ----------------
 app.post('/api/extract', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+  console.log('Upload received:', {
+    originalname: req.file.originalname,
+    mimetype: req.file.mimetype,
+    size: req.file.size
+  });
+
   try {
     const { model = 'o3', forceMulti = 'auto' } = req.query;
-    const result = await extractContractFromPDF(req.file.path, model, forceMulti);
-    res.json(result);
+    const chosenModel = ['o3','o4-mini','gpt-4o-mini','o3-mini'].includes(model) ? model : 'o3';
+
+    // 1) Upload PDF to Files API with a proper name
+    const uploaded = await client.files.create({
+      file: await toFile(
+        fs.createReadStream(req.file.path),
+        req.file.originalname || 'contract.pdf'
+      ),
+      purpose: 'assistants'
+    });
+    console.log('OpenAI file_id:', uploaded.id);
+
+    // 2) Ask the model for a plain JSON object
+    const response = await client.responses.create({
+      model: chosenModel,
+      input: [
+        { role: 'system', content: buildSystemPrompt(forceMulti) },
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
+            { type: 'input_file', file_id: uploaded.id }
+          ]
+        }
+      ],
+      text: { format: { type: 'json_object' } }
+    });
+
+    // 3) Parse and normalize
+    const raw = response.output_text ?? JSON.stringify(response);
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      const a = raw.indexOf('{'); const b = raw.lastIndexOf('}');
+      data = a >= 0 && b > a ? JSON.parse(raw.slice(a, b + 1)) : { schedules: [], issues: [`Could not parse model JSON`] };
+    }
+
+    const schedules = Array.isArray(data.schedules) ? data.schedules : [];
+    const normalized = schedules.map((s) => {
+      // Start with any model-supplied issues
+      const issues = Array.isArray(s.issues) ? [...s.issues] : [];
+
+      const bt = clampEnum(
+        normalizeBillingType(s.billing_type, s),
+        BILLING_TYPES,
+        'Flat price'
+      );
+
+      const { every, unit } = normalizeFrequency(
+        s.frequency,
+        s.frequency_every,
+        s.frequency_unit,
+        'None'
+      );
+
+      // ---- Quantity heuristic for Flat price ----
+      let qty = pickNumber(s.quantity, null);
+      if (bt === 'Flat price') {
+        if (qty == null || qty > 1) {
+          const desc = `${s.description || ''} ${s.item_name || ''}`.toLowerCase();
+          const looksLikePerUnitMention = /\bx\s*\d+\b|\b\d+\s*(seats?|licenses?|users?)\b/.test(desc);
+          if (qty !== 1) {
+            issues.push(
+              `Quantity normalized to 1 for Flat price (model suggested "${qty}"${looksLikePerUnitMention ? ' based on descriptive copy' : ''}).`
+            );
+          }
+          qty = 1;
+        }
+      }
+
+      // Rev-rec category: leave null by default (you can set in Garage later)
+      const revRec = s.rev_rec_category ?? null;
+
+      const out = {
+        schedule_label: s.schedule_label ?? null,
+        item_name: String(s.item_name || '').trim(),
+        description: s.description ?? null,
+        billing_type: bt,
+        total_price: pickNumber(s.total_price, null),
+        quantity: qty,
+        start_date: s.start_date || null,
+
+        frequency_every: pickNumber(every, 1),
+        frequency_unit: clampEnum(unit, FREQ_UNITS, 'None'),
+
+        months_of_service: pickNumber(s.months_of_service, null),
+        periods: pickNumber(s.periods, 1),
+        calculated_end_date: s.calculated_end_date || null,
+        net_terms: pickNumber(s.net_terms, 30),
+        rev_rec_category: revRec,
+
+        // overage / usage specifics
+        event_to_track: s.event_to_track ?? null,
+        unit_label: s.unit_label ?? null,
+        price_per_unit: pickNumber(s.price_per_unit, null),
+        volume_based: typeof s.volume_based === 'boolean' ? s.volume_based : null,
+        tiers: Array.isArray(s.tiers)
+          ? s.tiers.map(t => ({
+              tier_name: t.tier_name ?? null,
+              price: pickNumber(t.price, null),
+              applied_when: t.applied_when ?? null,
+              min_quantity: pickNumber(t.min_quantity, null)
+            }))
+          : [],
+
+        evidence: Array.isArray(s.evidence) ? s.evidence.slice(0, 8) : [],
+        confidences: s.confidences || {},
+        overall_confidence: pickNumber(s.overall_confidence, 0.7),
+        issues
+      };
+
+      // Derived: total_value (Garage “Calculated subtotal” style)
+      out.total_value = computeTotalValue(out);
+      if (out.total_value == null && (out.billing_type.includes('Tier') || (out.tiers||[]).length)) {
+        out.issues.push('Total value not computed for tiered pricing (depends on actual usage).');
+      }
+      return out;
+    });
+
+    res.json({
+      model_used: chosenModel,
+      schedules: normalized,
+      model_recommendations: data.model_recommendations ?? null,
+      issues: Array.isArray(data.issues) ? data.issues : [],
+      totals_check: data.totals_check ?? null
+    });
   } catch (err) {
-    console.error('OpenAI error:', err);
-    res.status(500).json({ error: 'Extraction failed', debug: err });
+    const debug = {
+      message: err?.message,
+      status: err?.status,
+      name: err?.name,
+      type: err?.type,
+      code: err?.code,
+      request_id: err?.headers?.['x-request-id'],
+      data: err?.error ?? err?.response?.data ?? err?.response_body ?? null
+    };
+    console.error('OpenAI error:', JSON.stringify(debug, null, 2));
+    res.status(500).json({ error: 'Extraction failed', debug });
   } finally {
     fs.unlink(req.file.path, () => {});
   }
