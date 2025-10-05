@@ -97,12 +97,13 @@
         const qs = new URLSearchParams({ model: $('#model').value, forceMulti: $('#forceMulti').value }).toString();
         try {
           const res = await fetch('/api/extract?' + qs, { method: 'POST', body: fd });
-          const json = await res.json();
-          if (!res.ok) throw new Error(json.error || 'Request failed');
-          status.textContent = `Found ${json.schedules.length} schedule(s).`;
-          render(json);
+          const ct = res.headers.get('content-type') || '';
+          const payload = ct.includes('application/json') ? await res.json() : { error: await res.text() };
+          if (!res.ok) throw new Error(payload?.debug?.message || payload?.error || 'Request failed');
+          status.textContent = `Found ${payload.schedules.length} schedule(s).`;
+          render(payload);
         } catch (err) {
-          // If render throws later, we’ll also catch per-schedule below
+          // If render throws later, we'll also catch per-schedule below
           status.textContent = 'Error: ' + (err?.message || String(err));
         }
       });

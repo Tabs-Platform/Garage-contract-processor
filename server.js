@@ -13,6 +13,8 @@ const __dirname = path.dirname(__filename);
 const app = express();
 // Use /tmp for Vercel serverless (only writable directory in production)
 const uploadDir = process.env.NODE_ENV === 'production' ? '/tmp/uploads/' : 'uploads/';
+// Make sure the upload directory exists (especially in serverless)
+try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
 const upload = multer({ dest: uploadDir });
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PORT = process.env.PORT || 3000;
@@ -347,11 +349,21 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const { model = 'o3', forceMulti = 'auto' } = req.query;
-    const result = await extractContractFromPDF(req.file.path, model, forceMulti);
+    const allowed = ['gpt-4o-mini','o4-mini','o3','o3-mini'];
+    const chosenModel = allowed.includes(model) ? model : 'o3';
+    
+    const result = await extractContractFromPDF(req.file.path, chosenModel, forceMulti);
     res.json(result);
   } catch (err) {
-    console.error('OpenAI error:', err);
-    res.status(500).json({ error: 'Extraction failed', debug: err });
+    const debug = {
+      message: err?.message,
+      status: err?.status,
+      type: err?.type,
+      code: err?.code,
+      data: err?.response?.data, // some libs attach server JSON here
+    };
+    console.error('OpenAI error:', debug);
+    res.status(err?.status || 500).json({ error: 'Extraction failed', debug });
   } finally {
     fs.unlink(req.file.path, () => {});
   }
