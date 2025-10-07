@@ -372,20 +372,8 @@
 
       // Build the top-level object with revenue_schedule[]
       function toGarageAll(schedules) {
-        return {
-          name: "",
-          first_name: null,
-          last_name: null,
-          billing_email: null,
-          street_address_line_1: null,
-          street_address_line_2: null,
-          city: null,
-          state: null,
-          zip_code: null,
-          country: null,
-          accounting_currency: "USD",
-          revenue_schedule: (schedules || []).map(toGarageRevenue)
-        };
+        // Return only the revenue_schedule array
+        return (schedules || []).map(toGarageRevenue);
       }
     </script>
   </body>
