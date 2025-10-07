@@ -3,6 +3,7 @@ node_modules/
 
 # Environment variables (NEVER commit this!)
 
+
 # Uploads (temporary files)
 uploads/
 

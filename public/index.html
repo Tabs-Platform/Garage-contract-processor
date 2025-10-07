@@ -18,7 +18,6 @@
       h2 { font-size: 16px; margin: 0; letter-spacing: .02em; }
       .muted { color: var(--muted); font-size: 12px; }
       .btn { padding:10px 14px; border-radius:12px; border: 1px solid var(--ink); background:var(--ink); color:white; cursor:pointer; font-weight:600; }
-      .btn.secondary { background:#fff; color:var(--ink); }
 
       .card { border: 1px solid var(--border); border-radius: 16px; padding: 16px; background: var(--card); box-shadow: 0 4px 8px rgba(0,0,0,.04); margin: 16px 0; }
 
@@ -26,7 +25,7 @@
       .sched-header { display:grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 12px; margin-top: 8px; }
       .fieldset { border:1px solid var(--border); border-radius: 12px; padding: 10px; background: var(--bg); }
       .label { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 4px; display:block; }
-      .value { font-size: 14px; word-break: break-word; }
+      .value { font-size: 14px; }
 
       .section-title { color:#6d28d9; font-weight: 800; letter-spacing:.06em; margin: 16px 0 8px; }
       .grid-3 { display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
@@ -48,14 +47,14 @@
       .copy { cursor:pointer; font-size:12px; color:#2563eb; }
       .evidence-line { color: var(--muted); font-size:12px; margin-top:4px; }
 
+      /* page header controls */
       .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
       .toolbar select { height:40px; }
-      .spacer { flex:1; }
     </style>
   </head>
   <body>
     <h1>Garage Contract → Revenue Schedules</h1>
-    <p class="muted">Upload a PDF → get copy‑ready schedules that mirror Garage.</p>
+    <p class="muted">Upload a PDF → get copy-ready schedules that mirror Garage.</p>
 
     <div class="card">
       <form id="uploadForm">
@@ -73,8 +72,6 @@
             <option value="off">Single only</option>
           </select>
           <button class="btn" type="submit">Analyze</button>
-          <span class="spacer"></span>
-          <button id="copyAllJson" type="button" class="btn secondary" disabled>Copy Garage JSON (all)</button>
         </div>
       </form>
       <div id="status" class="muted" style="margin-top:8px;"></div>
@@ -84,123 +81,111 @@
 
     <script>
       const BILLING_TYPES = ['Flat price','Unit price','Tier flat price','Tier unit price'];
-      const FREQ_UNITS_DISPLAY = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year(s)'];
-
-      // mapping to your API enum
-      const FREQ_TO_ENUM = {
-        'None': 'NONE',
-        'Day(s)': 'DAYS',
-        'Week(s)': 'DAYS',        // we express weeks as DAYS with period *= 7
-        'Semi_month(s)': 'SEMI_MONTH',
-        'Month(s)': 'MONTH',
-        'Year(s)': 'YEAR'
-        // QUARTER not in the extractor UI; if you ever add it, map to 'QUARTER'
-      };
+      const FREQ_UNITS = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year(s)'];
 
       const $ = (s) => document.querySelector(s);
       const results = $('#results');
       const status = $('#status');
-      const copyAllBtn = $('#copyAllJson');
-      let lastResponse = null;
 
       // ---------- upload & call ----------
       $('#uploadForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         results.innerHTML = '';
         status.textContent = 'Uploading & extracting…';
-        copyAllBtn.disabled = true;
         const fd = new FormData();
         fd.append('file', $('#file').files[0]);
         const qs = new URLSearchParams({ model: $('#model').value, forceMulti: $('#forceMulti').value }).toString();
         try {
           const res = await fetch('/api/extract?' + qs, { method: 'POST', body: fd });
-          const ct = res.headers.get('content-type') || '';
-          const payload = ct.includes('application/json') ? await res.json() : { error: await res.text() };
-          if (!res.ok) throw new Error(payload?.debug?.message || payload?.error || 'Request failed');
-          status.textContent = `Found ${payload.schedules.length} schedule(s).`;
-          lastResponse = payload;
-          render(payload);
-          copyAllBtn.disabled = (payload.schedules || []).length === 0;
+          const json = await res.json();
+          if (!res.ok) throw new Error(json.error || 'Request failed');
+          status.textContent = `Found ${json.schedules.length} schedule(s).`;
+          render(json);
         } catch (err) {
+          // If render throws later, we’ll also catch per-schedule below
           status.textContent = 'Error: ' + (err?.message || String(err));
         }
-      });
-
-      copyAllBtn.addEventListener('click', () => {
-        if (!lastResponse?.schedules?.length) return;
-        const json = toGaragePayloadAll(lastResponse.schedules);
-        navigator.clipboard.writeText(JSON.stringify(json, null, 2)).then(()=>alert('Copied full Garage JSON (all schedules).'));
       });
 
       // ---------- render ----------
       function render(data) {
         (data.schedules || []).forEach((s, i) => {
-          const conf = s.overall_confidence ?? 0.7;
-          const confClass = conf >= 0.85 ? 'conf-ok' : (conf < 0.6 ? 'conf-bad' : 'conf-warn');
+          try {
+            const conf = s.overall_confidence ?? 0.7;
+            const confClass = conf >= 0.85 ? 'conf-ok' : (conf < 0.6 ? 'conf-bad' : 'conf-warn');
 
-          const months = deriveMonthsOfService(s);
-          const endDate = computeCalculatedEndDate(s) || s.calculated_end_date || '';
-          const totalValue = computeTotalValue(s);
+            // Fallbacks (if the model didn’t include them)
+            const months = deriveMonthsOfService(s);
+            const endDate = computeCalculatedEndDate(s) || s.calculated_end_date || '';
+            const totalValue = computeTotalValue(s);
 
-          const card = document.createElement('div');
-          card.className = 'card';
+            const card = document.createElement('div');
+            card.className = 'card';
 
-          card.innerHTML = `
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-              <h2>REVENUE SCHEDULE ${i+1}</h2>
-              <span class="pill ${confClass}">Confidence ${Math.round(conf*100)}%</span>
-            </div>
-
-            <div class="sched-header">
-              ${kv('Service start date', s.start_date || '')}
-              ${kv('Total months of service', months ?? '')}
-              ${kv('Calculated service end date', endDate || '')}
-              ${kv('Category for rev rec (optional)', s.rev_rec_category || '')}
-              ${kv('Total value', totalValue != null ? money(totalValue) : '')}
-            </div>
-
-            <div class="section-title">ITEM 1 AND PRICE</div>
-
-            <div class="grid-3">
-              ${field('Item name', s.item_name)}
-              ${select('Billing type', BILLING_TYPES, s.billing_type)}
-              ${field('Total price', money(s.total_price))}
-            </div>
-
-            <div class="grid-3" style="margin-top:8px;">
-              ${field('Quantity', s.quantity ?? 1)}
-              ${field('Start date', s.start_date ?? '')}
-              ${smallField('# periods', s.periods ?? 1)}
-            </div>
-
-            <div class="row" style="margin-top:8px;">
-              <div class="row">
-                ${smallField('every', s.frequency_every ?? 1)}
-                ${select('Frequency', FREQ_UNITS_DISPLAY, s.frequency_unit ?? 'None')}
+            // header strip like Garage
+            card.innerHTML = `
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <h2>REVENUE SCHEDULE ${i+1}</h2>
+                <span class="pill ${confClass}">Confidence ${Math.round(conf*100)}%</span>
               </div>
-              ${smallField('Net terms', s.net_terms ?? 30)}
-            </div>
 
-            <div class="grid-2" style="margin-top:8px;">
-              ${field('Calculated end date', endDate || '')}
-              ${field('Calculated subtotal', money(totalValue ?? s.total_price))}
-            </div>
+              <div class="sched-header">
+                ${kv('Service start date', s.start_date || '')}
+                ${kv('Total months of service', months ?? '')}
+                ${kv('Calculated service end date', endDate || '')}
+                ${kv('Category for rev rec (optional)', s.rev_rec_category || '')}
+                ${kv('Total value', totalValue != null ? money(totalValue) : '')}
+              </div>
 
-            ${renderOverage(s)}
+              <div class="section-title">ITEM 1 AND PRICE</div>
 
-            <div style="margin-top:12px;">
-              <h3 style="margin:0 0 6px;">Evidence</h3>
-              ${(s.evidence||[]).slice(0,6).map(ev => `<div class="evidence-line">p.${safe(ev?.page)}: ${escapeHtml(safe(ev?.snippet)).slice(0,200)}…</div>`).join('')}
-            </div>
+              <div class="grid-3">
+                ${field('Item name', s.item_name)}
+                ${select('Billing type', BILLING_TYPES, s.billing_type)}
+                ${field('Total price', money(s.total_price))}
+              </div>
 
-            ${Array.isArray(s.issues) && s.issues.length ? `<div style="margin-top:10px;" class="muted">${s.issues.map(x=>`• ${escapeHtml(safe(x))}`).join('<br/>')}</div>` : ''}
+              <div class="grid-3" style="margin-top:8px;">
+                ${field('Quantity', s.quantity ?? 1)}
+                ${field('Start date', s.start_date ?? '')}
+                ${smallField('# periods', s.periods ?? 1)}
+              </div>
 
-            <div style="margin-top:12px; display:flex; gap:16px; flex-wrap:wrap;">
-              <span class="copy" onclick='copyText(${js(toPlan({...s, calculated_end_date:endDate}))})'>Copy Garage plan</span>
-              <span class="copy" onclick='copyText(${js(toGarageSchedule(s))})'>Copy Garage JSON (this)</span>
-            </div>
-          `;
-          results.appendChild(card);
+              <div class="row" style="margin-top:8px;">
+                <div class="row">
+                  ${smallField('every', s.frequency_every ?? 1)}
+                  ${select('Frequency', FREQ_UNITS, s.frequency_unit ?? 'None')}
+                </div>
+                ${smallField('Net terms', s.net_terms ?? 30)}
+              </div>
+
+              <div class="grid-2" style="margin-top:8px;">
+                ${field('Calculated end date', endDate || '')}
+                ${field('Calculated subtotal', money(totalValue ?? s.total_price))}
+              </div>
+
+              ${renderOverage(s)}
+
+              <div style="margin-top:12px;">
+                <h3 style="margin:0 0 6px;">Evidence</h3>
+                ${(s.evidence||[]).slice(0,6).map(ev => `<div class="evidence-line">p.${safe(ev?.page)}: ${escapeHtml(safe(ev?.snippet)).slice(0,200)}…</div>`).join('')}
+              </div>
+
+              ${Array.isArray(s.issues) && s.issues.length ? `<div style="margin-top:10px;" class="muted">${s.issues.map(x=>`• ${escapeHtml(safe(x))}`).join('<br/>')}</div>` : ''}
+
+              <div style="margin-top:12px;">
+                <span class="copy" onclick='copyPlan(${JSON.stringify(JSON.stringify(toPlan({...s, calculated_end_date:endDate}))).replace(/'/g,"&#39;")})'>Copy Garage plan</span>
+              </div>
+            `;
+
+            results.appendChild(card);
+          } catch (e) {
+            console.error('Render error on schedule', i+1, e);
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.innerHTML = `<div class="muted">Render error on schedule ${i+1}: ${escapeHtml(safe(e?.message))}</div>`;
+            results.appendChild(card);
+          }
         });
       }
 
@@ -228,13 +213,14 @@
       // SAFETY: always coerce to string before replace()
       function escapeHtml(s){
         const str = s === null || s === undefined ? '' : String(s);
-        return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&gt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
+        return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
       }
       function safe(v){ return v === null || v === undefined ? '' : v; }
-      function js(obj){ return JSON.stringify(JSON.stringify(obj)).replace(/'/g,"&#39;"); }
-      function copyText(objStr){ navigator.clipboard.writeText(JSON.parse(objStr)).then(()=>alert('Copied!')); }
+      function copyPlan(txt){ navigator.clipboard.writeText(txt).then(()=>alert('Copied! Paste into Garage.')); }
 
       // ---------- totals & dates ----------
+      // Total value: quantity ignored (per your rule)
+      // Recurring (Frequency != "None"): price * periods; One-time: price
       function computeTotalValue(s) {
         const price = Number(s?.total_price);
         if (!Number.isFinite(price)) return null;
@@ -243,6 +229,7 @@
         return recurring ? price * periods : price;
       }
 
+      // Derive months if not provided
       function deriveMonthsOfService(s) {
         if (Number.isFinite(Number(s?.months_of_service))) return Number(s.months_of_service);
         const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
@@ -258,6 +245,7 @@
         return '';
       }
 
+      // Compute end date if missing: start + (every × periods × unit)
       function computeCalculatedEndDate(s) {
         if (s?.calculated_end_date) return s.calculated_end_date;
         const startStr = s?.start_date;
@@ -332,13 +320,16 @@
         `;
       }
 
-      // ---------- “Copy Garage plan” (simple, per schedule) ----------
+      // ---------- copy plan mapping ----------
       function toPlan(s){
         const base = {
+          // Header strip
           service_start_date: s.start_date || '',
           total_months_of_service: deriveMonthsOfService(s) || '',
           calculated_service_end_date: computeCalculatedEndDate(s) || s.calculated_end_date || '',
           rev_rec_category: s.rev_rec_category || '',
+
+          // Item & price
           item_name: s.item_name,
           billing_type: s.billing_type,
           total_price: s.total_price ?? null,
@@ -349,6 +340,7 @@
           frequency_unit: s.frequency_unit ?? 'None',
           net_terms: s.net_terms ?? 30
         };
+
         if (s.billing_type !== 'Flat price') {
           base.event_to_track = s.event_to_track ?? null;
           base.unit_label = s.unit_label ?? null;
@@ -357,71 +349,6 @@
           base.tiers = Array.isArray(s.tiers) ? s.tiers : [];
         }
         return base;
-      }
-
-      // ---------- NEW: “Copy Garage JSON” (per schedule + all) ----------
-      function toGarageSchedule(s) {
-        // frequency → enum mapping + weekly normalization
-        const uiUnit = s.frequency_unit || 'None';
-        const enumUnit = FREQ_TO_ENUM[uiUnit] || 'NONE';
-        const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
-        const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
-        const periodValue = (uiUnit === 'Week(s)') ? every * 7 : every;
-
-        const months = deriveMonthsOfService(s);
-
-        // billing type → enum
-        const bt = (s.billing_type || 'Flat price').toUpperCase().replace(/\s+/g,'_'); // FLAT_PRICE, UNIT_PRICE, TIER_FLAT_PRICE, TIER_UNIT_PRICE
-
-        // tiers mapping
-        const pricing_tiers = Array.isArray(s.tiers)
-          ? s.tiers.map((t, idx) => ({
-              tier: idx + 1,
-              mantissa: (t?.price != null ? String(t.price) : null),
-              exponent: (t?.price != null ? '0' : null),
-              condition_value: Number.isFinite(Number(t?.min_quantity)) ? Number(t.min_quantity) : null,
-              condition_operator: Number.isFinite(Number(t?.min_quantity)) ? 'GREATER_THAN_EQUAL' : null,
-              name: t?.tier_name ?? null
-            }))
-          : [];
-
-        return {
-          service_start_date: s.start_date || null,
-          service_term: Number.isFinite(months) ? months : null,
-          revenue_category: s.rev_rec_category ?? null,
-          item_name: s.item_name ?? '',
-          item_description: s.description ?? null,
-          start_date: s.start_date || null,
-          frequency_unit: enumUnit,
-          period: periodValue,
-          number_of_periods: periods,
-          arrears: false,
-          billing_type: bt,
-          event_to_track: s.event_to_track ?? null,
-          integration_item: null,
-          discounts: [],
-          net_terms: Number.isFinite(Number(s?.net_terms)) ? Number(s.net_terms) : 30,
-          quantity: Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : 1,
-          total_price: Number.isFinite(Number(s?.total_price)) ? Number(s.total_price) : null,
-          pricing_tiers
-        };
-      }
-
-      function toGaragePayloadAll(schedules) {
-        return {
-          name: "",
-          first_name: null,
-          last_name: null,
-          billing_email: null,
-          street_address_line_1: null,
-          street_address_line_2: null,
-          city: null,
-          state: null,
-          zip_code: null,
-          country: null,
-          accounting_currency: "USD",
-          revenue_schedule: (schedules || []).map(toGarageSchedule)
-        };
       }
     </script>
   </body>
