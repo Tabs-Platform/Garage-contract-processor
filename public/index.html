@@ -47,11 +47,17 @@
       .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
       .toolbar select { height:40px; }
       .toolbar .spacer { flex:1; }
+
+      /* confidence chips */
+      .chip { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; border:1px solid var(--border); font-size:12px; }
+      .chip.good { background:#ecfdf5; }
+      .chip.warn { background:#fffbeb; }
+      .chip.bad  { background:#fef2f2; }
     </style>
   </head>
   <body>
     <h1>Garage Contract → Revenue Schedules</h1>
-    <p class="muted">Upload a PDF → get copy‑ready schedules that mirror Garage.</p>
+    <p class="muted">Upload a PDF → get copy-ready schedules that mirror Garage.</p>
 
     <div class="card">
       <form id="uploadForm">
@@ -67,6 +73,11 @@
             <option value="auto" selected>Auto multi</option>
             <option value="on">Force multi</option>
             <option value="off">Single only</option>
+          </select>
+          <select id="runs">
+            <option value="2" selected>Agreement: 2 runs</option>
+            <option value="1">Agreement: off (1 run)</option>
+            <option value="3">Agreement: 3 runs</option>
           </select>
           <div class="spacer"></div>
           <button class="btn" type="submit">Analyze</button>
@@ -98,13 +109,21 @@
         status.textContent = 'Uploading & extracting…';
         const fd = new FormData();
         fd.append('file', $('#file').files[0]);
-        const qs = new URLSearchParams({ model: $('#model').value, forceMulti: $('#forceMulti').value }).toString();
+        const qs = new URLSearchParams({
+          model: $('#model').value,
+          forceMulti: $('#forceMulti').value,
+          runs: $('#runs').value
+        }).toString();
         try {
           const res = await fetch('/api/extract?' + qs, { method: 'POST', body: fd });
           const ct = res.headers.get('content-type') || '';
           const payload = ct.includes('application/json') ? await res.json() : { error: await res.text() };
           if (!res.ok) throw new Error(payload?.debug?.message || payload?.error || 'Request failed');
-          status.textContent = `Found ${payload.schedules.length} schedule(s).`;
+
+          const flagged = (payload.schedules||[]).filter(s => s.flag_for_review).length;
+          const avg = payload?.agreement_summary?.avg_confidence != null ? (payload.agreement_summary.avg_confidence*100).toFixed(0)+'%' : '—';
+          status.textContent = `Found ${payload.schedules.length} schedule(s).  •  Avg confidence: ${avg}  •  Flagged: ${flagged}  •  Runs: ${payload.runs||1}`;
+
           lastPayload = payload;
           renderTopCopy(payload);
           render(payload);
@@ -120,7 +139,7 @@
         card.className = 'card';
         card.innerHTML = `
           <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;">
-            <div><b>Bulk copy</b> — top-level object with <code>revenue_schedule</code> array for all items.</div>
+            <div><b>Bulk copy</b> — array of Garage <code>revenue_schedule</code> items (from Run #1 only).</div>
             <button class="btn secondary" id="copyAll">Copy Garage JSON (All)</button>
           </div>
         `;
@@ -138,12 +157,17 @@
             const months = deriveMonthsOfService(s);
             const endDate = computeCalculatedEndDate(s) || s.calculated_end_date || '';
             const totalValue = computeTotalValue(s);
+            const conf = typeof s.confidence === 'number' ? s.confidence : null;
+            const chip = confidenceChip(conf, !!s.flag_for_review);
 
             const card = document.createElement('div');
             card.className = 'card';
             card.innerHTML = `
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                <h2>REVENUE SCHEDULE ${i+1}</h2>
+                <div style="display:flex;align-items:center;gap:10px;">
+                  <h2>REVENUE SCHEDULE ${i+1}</h2>
+                  ${chip}
+                </div>
                 <button class="btn secondary" data-idx="${i}">Copy Garage JSON (This item)</button>
               </div>
 
@@ -189,11 +213,12 @@
                 ${(s.evidence||[]).slice(0,6).map(ev => `<div class="evidence-line">p.${safe(ev?.page)}: ${escapeHtml(safe(ev?.snippet)).slice(0,200)}…</div>`).join('')}
               </div>
 
+              ${renderAgreementBlock(s)}
               ${Array.isArray(s.issues) && s.issues.length ? `<div style="margin-top:10px;" class="muted">${s.issues.map(x=>`• ${escapeHtml(safe(x))}`).join('<br/>')}</div>` : ''}
             `;
             results.appendChild(card);
 
-            // Wire the per-item copy button
+            // Wire the per-item copy button (always Run #1)
             card.querySelector('button.btn.secondary').onclick = () => {
               const one = toGarageRevenue({ ...s, calculated_end_date: endDate });
               navigator.clipboard.writeText(JSON.stringify(one, null, 2)).then(()=>alert(`Copied Garage JSON for item ${i+1}`));
@@ -223,6 +248,27 @@
       }
       function escapeHtml(s){ const str = (s==null)?'':String(s); return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
       function safe(v){ return v == null ? '' : v; }
+
+      function confidenceChip(conf, flagged){
+        if (conf == null) return `<span class="chip">Confidence: —</span>`;
+        const pct = Math.round(conf*100);
+        const cls = flagged ? 'bad' : (pct >= 90 ? 'good' : pct >= 75 ? 'warn' : 'bad');
+        const label = flagged ? 'Needs review' : (pct >= 90 ? 'High' : pct >= 75 ? 'Medium' : 'Low');
+        return `<span class="chip ${cls}"><b>${label}</b> • ${pct}%</span>`;
+      }
+      function renderAgreementBlock(s){
+        if (!s.agreement) return '';
+        const f = s.agreement.fields || {};
+        const row = (k,v) => `<div class="evidence-line">${escapeHtml(k)}: ${(Math.round((v||0)*100))}%</div>`;
+        return `
+          <div style="margin-top:12px;">
+            <h3 style="margin:0 0 6px;">Agreement (Run #2 vs Run #1)</h3>
+            ${row('Item name', f.item_name)}${row('Total price', f.total_price)}${row('Start date', f.start_date)}
+            ${row('Frequency unit', f.frequency_unit)}${row('Frequency every', f.frequency_every)}
+            ${row('Unit label', f.unit_label)}${row('Event to track', f.event_to_track)}${row('Tiers', f.tiers)}
+          </div>
+        `;
+      }
 
       // ---------- totals & dates ----------
       function computeTotalValue(s) {
@@ -370,9 +416,8 @@
         };
       }
 
-      // Build the top-level object with revenue_schedule[]
+      // Build the top-level array of revenue_schedule[]
       function toGarageAll(schedules) {
-        // Return only the revenue_schedule array
         return (schedules || []).map(toGarageRevenue);
       }
     </script>

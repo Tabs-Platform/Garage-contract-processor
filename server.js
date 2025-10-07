@@ -146,14 +146,191 @@ app.get('/health', async (_req, res) => {
   }
 });
 
+// ---------- parsing & normalization helpers ----------
+function parseModelJson(apiResponse) {
+  const raw = apiResponse?.output_text ?? JSON.stringify(apiResponse || {});
+  try { return JSON.parse(raw); }
+  catch {
+    const a = raw.indexOf('{'); const b = raw.lastIndexOf('}');
+    return (a >= 0 && b > a) ? JSON.parse(raw.slice(a, b + 1)) : { schedules: [], issues: ['Could not parse model JSON'] };
+  }
+}
+function normalizeSchedules(data) {
+  const schedules = Array.isArray(data?.schedules) ? data.schedules : [];
+  return schedules.map((s) => {
+    const issues = Array.isArray(s.issues) ? [...s.issues] : [];
+    const bt = clampEnum(normalizeBillingType(s.billing_type, s), BILLING_TYPES, 'Flat price');
+    const { every, unit } = normalizeFrequency(s.frequency, s.frequency_every, s.frequency_unit, 'None');
+
+    // Quantity heuristic: default Flat price to 1; otherwise leave as provided or null
+    let qty = pickNumber(s.quantity, null);
+    if (bt === 'Flat price') qty = 1;
+
+    const out = {
+      schedule_label: s.schedule_label ?? null,
+      item_name: String(s.item_name || '').trim(),
+      description: s.description ?? null,
+      billing_type: bt,
+      total_price: pickNumber(s.total_price, null),
+      quantity: qty,
+      start_date: s.start_date || null,
+
+      frequency_every: pickNumber(every, 1),
+      frequency_unit: clampEnum(unit, FREQ_UNITS, 'None'),
+
+      months_of_service: pickNumber(s.months_of_service, null),
+      periods: pickNumber(s.periods, 1),
+      calculated_end_date: s.calculated_end_date || null,
+      net_terms: pickNumber(s.net_terms, 0),
+      rev_rec_category: s.rev_rec_category ?? null,
+
+      event_to_track: s.event_to_track ?? null,
+      unit_label: s.unit_label ?? null,
+      price_per_unit: pickNumber(s.price_per_unit, null),
+      volume_based: typeof s.volume_based === 'boolean' ? s.volume_based : null,
+      tiers: Array.isArray(s.tiers)
+        ? s.tiers.map(t => ({
+            tier_name: t.tier_name ?? null,
+            price: pickNumber(t.price, null),
+            applied_when: t.applied_when ?? null,
+            min_quantity: pickNumber(t.min_quantity, null)
+          }))
+        : [],
+
+      evidence: Array.isArray(s.evidence) ? s.evidence.slice(0, 8) : [],
+      issues
+    };
+    // Derived, for UI only (not returned in Garage JSON)
+    out.total_value = computeTotalValue(out);
+    return out;
+  });
+}
+
+// ---------- agreement & confidence ----------
+function clamp01(x){ return Math.max(0, Math.min(1, Number(x)||0)); }
+function tokenize(s) {
+  if (!s) return [];
+  return String(s).toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(x => x && x.length > 1);
+}
+function jaccardTokens(a, b) {
+  const A = new Set(tokenize(a)); const B = new Set(tokenize(b));
+  if (!A.size && !B.size) return 1;
+  const inter = [...A].filter(x => B.has(x)).length;
+  const union = new Set([...A, ...B]).size;
+  return union ? inter / union : 0;
+}
+function numericSimilarity(a, b) {
+  if (a == null && b == null) return 1;
+  if (a == null || b == null) return 0;
+  const x = Number(a), y = Number(b);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return 0;
+  const diff = Math.abs(x - y);
+  const denom = Math.max(1, Math.abs(x), Math.abs(y));
+  return clamp01(1 - diff / denom);
+}
+function dateSimilarity(a, b) {
+  if (!a && !b) return 1;
+  if (!a || !b) return 0;
+  const da = new Date(a), db = new Date(b);
+  if (isNaN(da) || isNaN(db)) return 0;
+  const days = Math.abs((db - da) / (1000*60*60*24));
+  return clamp01(Math.exp(-days/30)); // ~1 within few days; decays over ~1 month
+}
+function enumSimilarity(a, b) { return (a && b && String(a) === String(b)) ? 1 : (!a && !b ? 1 : 0); }
+function tiersSimilarity(ta, tb) {
+  if (!Array.isArray(ta) && !Array.isArray(tb)) return 1;
+  if (!Array.isArray(ta) || !Array.isArray(tb)) return 0;
+  if (ta.length === 0 && tb.length === 0) return 1;
+  const len = Math.max(ta.length, tb.length);
+  if (!len) return 1;
+  let score = 0;
+  for (let i=0;i<len;i++){
+    const a = ta[i] || {}, b = tb[i] || {};
+    const name = jaccardTokens(a.tier_name, b.tier_name);
+    const price = numericSimilarity(a.price, b.price);
+    const minq = numericSimilarity(a.min_quantity, b.min_quantity);
+    score += (name*0.3 + price*0.5 + minq*0.2);
+  }
+  return clamp01(score / len);
+}
+function scheduleSimilarity(a, b) {
+  const fields = {};
+  fields.item_name = jaccardTokens(a.item_name, b.item_name);
+  fields.total_price = numericSimilarity(a.total_price, b.total_price);
+  fields.start_date = dateSimilarity(a.start_date, b.start_date);
+  fields.frequency_unit = enumSimilarity(a.frequency_unit, b.frequency_unit);
+  fields.frequency_every = numericSimilarity(a.frequency_every, b.frequency_every);
+  fields.unit_label = jaccardTokens(a.unit_label, b.unit_label);
+  fields.event_to_track = jaccardTokens(a.event_to_track, b.event_to_track);
+  fields.tiers = tiersSimilarity(a.tiers, b.tiers);
+  const w = {
+    item_name: 0.35, total_price: 0.25, start_date: 0.10,
+    frequency_unit: 0.10, frequency_every: 0.05,
+    unit_label: 0.05, event_to_track: 0.05, tiers: 0.05
+  };
+  const sim =
+    w.item_name*fields.item_name +
+    w.total_price*fields.total_price +
+    w.start_date*fields.start_date +
+    w.frequency_unit*fields.frequency_unit +
+    w.frequency_every*fields.frequency_every +
+    w.unit_label*fields.unit_label +
+    w.event_to_track*fields.event_to_track +
+    w.tiers*fields.tiers;
+  return { sim: clamp01(sim), fields };
+}
+function keyCompletenessPenalty(s) {
+  const keys = ['item_name','total_price','start_date','frequency_unit','periods'];
+  const missing = keys.reduce((acc, k) => acc + (s[k]==null || s[k]==='' ? 1 : 0), 0);
+  return clamp01(1 - (missing / keys.length) * 0.5); // up to -50% if all missing
+}
+function computeAgreement(first, second) {
+  const n = second.length;
+  const used = new Set();
+  const enriched = first.map((a) => {
+    let best = { j: -1, sim: 0, fields: {} };
+    for (let j = 0; j < n; j++) {
+      if (used.has(j)) continue;
+      const score = scheduleSimilarity(a, second[j]);
+      if (score.sim > best.sim) best = { j, ...score };
+    }
+    if (best.j >= 0) used.add(best.j);
+    const missingPenalty = keyCompletenessPenalty(a);
+    const confidence = clamp01(0.2 + 0.8 * best.sim * missingPenalty); // 20% floor
+    const flag_for_review = confidence < 0.75 || best.sim < 0.70;
+    return {
+      confidence,
+      flag_for_review,
+      agreement: {
+        matched_index_in_run2: best.j,
+        similarity: best.sim,
+        fields: best.fields
+      }
+    };
+  });
+  const avg = enriched.length ? (enriched.reduce((s, e) => s + e.confidence, 0) / enriched.length) : null;
+  const min = enriched.length ? enriched.reduce((m, e) => Math.min(m, e.confidence), 1) : null;
+  return {
+    enriched,
+    summary: {
+      avg_confidence: avg,
+      min_confidence: min,
+      total_items_run1: first.length,
+      total_items_run2: second.length,
+      unmatched_in_run2: Math.max(0, first.length - used.size)
+    }
+  };
+}
+
 // ---- main extraction ----
 app.post('/api/extract', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   console.log('Upload received:', { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size });
 
   try {
-    const { model = 'o3', forceMulti = 'auto' } = req.query;
+    const { model = 'o3', forceMulti = 'auto', runs = '2' } = req.query;
     const chosenModel = ['o3','o4-mini','gpt-4o-mini','o3-mini'].includes(model) ? model : 'o3';
+    const agreementRuns = Math.max(1, Math.min(5, Number(runs) || 1)); // cap @ 5
 
     // 1) Upload PDF with a real filename so the API knows it's a PDF
     const uploaded = await client.files.create({
@@ -162,8 +339,8 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
     });
     console.log('OpenAI file_id:', uploaded.id);
 
-    // 2) Ask for a single JSON object
-    const response = await client.responses.create({
+    // 2) Ask for a single JSON object (Run #1)
+    const response1 = await client.responses.create({
       model: chosenModel,
       input: [
         { role: 'system', content: buildSystemPrompt(forceMulti) },
@@ -175,72 +352,42 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
       text: { format: { type: 'json_object' } }
     });
 
-    // 3) Parse and normalize (drop any confidence fields)
-    const raw = response.output_text ?? JSON.stringify(response);
-    let data;
-    try { data = JSON.parse(raw); }
-    catch {
-      const a = raw.indexOf('{'); const b = raw.lastIndexOf('}');
-      data = (a >= 0 && b > a) ? JSON.parse(raw.slice(a, b + 1)) : { schedules: [], issues: ['Could not parse model JSON'] };
+    // 3) Parse and normalize Run #1
+    const data1 = parseModelJson(response1);
+    const norm1 = normalizeSchedules(data1);
+
+    // 4) Optional Run #2 — identical prompt/model/PDF for agreement scoring
+    let norm2 = null;
+    let agreement = null;
+    if (agreementRuns >= 2) {
+      const response2 = await client.responses.create({
+        model: chosenModel,
+        input: [
+          { role: 'system', content: buildSystemPrompt(forceMulti) },
+          { role: 'user',   content: [
+              { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
+              { type: 'input_file', file_id: uploaded.id }
+          ] }
+        ],
+        text: { format: { type: 'json_object' } }
+      });
+      const data2 = parseModelJson(response2);
+      norm2 = normalizeSchedules(data2);
+      agreement = computeAgreement(norm1, norm2);
+      // Attach per-item confidence onto Run #1 items only
+      agreement.enriched.forEach((extra, idx) => {
+        Object.assign(norm1[idx], extra);
+      });
     }
-
-    const schedules = Array.isArray(data.schedules) ? data.schedules : [];
-    const normalized = schedules.map((s) => {
-      const issues = Array.isArray(s.issues) ? [...s.issues] : [];
-
-      const bt = clampEnum(normalizeBillingType(s.billing_type, s), BILLING_TYPES, 'Flat price');
-      const { every, unit } = normalizeFrequency(s.frequency, s.frequency_every, s.frequency_unit, 'None');
-
-      // Quantity heuristic: default Flat price to 1; otherwise leave as provided or null
-      let qty = pickNumber(s.quantity, null);
-      if (bt === 'Flat price') qty = 1;
-
-      const out = {
-        schedule_label: s.schedule_label ?? null,
-        item_name: String(s.item_name || '').trim(),
-        description: s.description ?? null,
-        billing_type: bt,
-        total_price: pickNumber(s.total_price, null),
-        quantity: qty,
-        start_date: s.start_date || null,
-
-        frequency_every: pickNumber(every, 1),
-        frequency_unit: clampEnum(unit, FREQ_UNITS, 'None'),
-
-        months_of_service: pickNumber(s.months_of_service, null),
-        periods: pickNumber(s.periods, 1),
-        calculated_end_date: s.calculated_end_date || null,
-        net_terms: pickNumber(s.net_terms, 0),
-        rev_rec_category: s.rev_rec_category ?? null,
-
-        event_to_track: s.event_to_track ?? null,
-        unit_label: s.unit_label ?? null,
-        price_per_unit: pickNumber(s.price_per_unit, null),
-        volume_based: typeof s.volume_based === 'boolean' ? s.volume_based : null,
-        tiers: Array.isArray(s.tiers)
-          ? s.tiers.map(t => ({
-              tier_name: t.tier_name ?? null,
-              price: pickNumber(t.price, null),
-              applied_when: t.applied_when ?? null,
-              min_quantity: pickNumber(t.min_quantity, null)
-            }))
-          : [],
-
-        evidence: Array.isArray(s.evidence) ? s.evidence.slice(0, 8) : [],
-        issues
-      };
-
-      // Derived, for UI only (not returned in Garage JSON)
-      out.total_value = computeTotalValue(out);
-      return out;
-    });
 
     res.json({
       model_used: chosenModel,
-      schedules: normalized,
-      model_recommendations: data.model_recommendations ?? null,
-      issues: Array.isArray(data.issues) ? data.issues : [],
-      totals_check: data.totals_check ?? null
+      runs: agreementRuns,
+      schedules: norm1,
+      model_recommendations: data1.model_recommendations ?? null,
+      issues: Array.isArray(data1.issues) ? data1.issues : [],
+      totals_check: data1.totals_check ?? null,
+      agreement_summary: agreement?.summary ?? null
     });
   } catch (err) {
     const debug = {
