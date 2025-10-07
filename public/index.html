@@ -10,14 +10,15 @@
     <style>
       :root {
         --border:#e5e7eb; --ink:#111827; --muted:#6b7280; --bg:#fff; --card:#fff; --chip:#eef2ff; --chip-ink:#3730a3;
-        --ok:#dcfce7; --ok-ink:#065f46; --warn:#fef3c7; --warn-ink:#92400e; --bad:#fee2e2; --bad-ink:#991b1b;
       }
       * { box-sizing: border-box; }
       body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 24px; color: var(--ink); }
       h1 { font-size: 22px; margin: 0 0 8px; }
       h2 { font-size: 16px; margin: 0; letter-spacing: .02em; }
       .muted { color: var(--muted); font-size: 12px; }
+
       .btn { padding:10px 14px; border-radius:12px; border: 1px solid var(--ink); background:var(--ink); color:white; cursor:pointer; font-weight:600; }
+      .btn.secondary { background:white; color:var(--ink); border-color:var(--border); }
 
       .card { border: 1px solid var(--border); border-radius: 16px; padding: 16px; background: var(--card); box-shadow: 0 4px 8px rgba(0,0,0,.04); margin: 16px 0; }
 
@@ -39,22 +40,18 @@
         background:#fff !important; color:var(--ink) !important; opacity:1 !important; -webkit-text-fill-color:var(--ink) !important;
       }
 
-      .pill { display:inline-block; padding:2px 8px; border-radius:9999px; background:var(--chip); color:var(--chip-ink); font-size:12px; font-weight:600; }
-      .conf-ok { background: var(--ok); color: var(--ok-ink); }
-      .conf-warn { background: var(--warn); color: var(--warn-ink); }
-      .conf-bad { background: var(--bad); color: var(--bad-ink); }
-
       .copy { cursor:pointer; font-size:12px; color:#2563eb; }
       .evidence-line { color: var(--muted); font-size:12px; margin-top:4px; }
 
       /* page header controls */
       .toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
       .toolbar select { height:40px; }
+      .toolbar .spacer { flex:1; }
     </style>
   </head>
   <body>
     <h1>Garage Contract → Revenue Schedules</h1>
-    <p class="muted">Upload a PDF → get copy-ready schedules that mirror Garage.</p>
+    <p class="muted">Upload a PDF → get copy‑ready schedules that mirror Garage.</p>
 
     <div class="card">
       <form id="uploadForm">
@@ -71,11 +68,15 @@
             <option value="on">Force multi</option>
             <option value="off">Single only</option>
           </select>
+          <div class="spacer"></div>
           <button class="btn" type="submit">Analyze</button>
         </div>
       </form>
       <div id="status" class="muted" style="margin-top:8px;"></div>
     </div>
+
+    <!-- Where we place the top-level “Copy Garage JSON (All)” after results load -->
+    <div id="bulkCopyContainer"></div>
 
     <div id="results"></div>
 
@@ -86,47 +87,64 @@
       const $ = (s) => document.querySelector(s);
       const results = $('#results');
       const status = $('#status');
+      const bulkCopyContainer = $('#bulkCopyContainer');
+      let lastPayload = null;
 
       // ---------- upload & call ----------
       $('#uploadForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         results.innerHTML = '';
+        bulkCopyContainer.innerHTML = '';
         status.textContent = 'Uploading & extracting…';
         const fd = new FormData();
         fd.append('file', $('#file').files[0]);
         const qs = new URLSearchParams({ model: $('#model').value, forceMulti: $('#forceMulti').value }).toString();
         try {
           const res = await fetch('/api/extract?' + qs, { method: 'POST', body: fd });
-          const json = await res.json();
-          if (!res.ok) throw new Error(json.error || 'Request failed');
-          status.textContent = `Found ${json.schedules.length} schedule(s).`;
-          render(json);
+          const ct = res.headers.get('content-type') || '';
+          const payload = ct.includes('application/json') ? await res.json() : { error: await res.text() };
+          if (!res.ok) throw new Error(payload?.debug?.message || payload?.error || 'Request failed');
+          status.textContent = `Found ${payload.schedules.length} schedule(s).`;
+          lastPayload = payload;
+          renderTopCopy(payload);
+          render(payload);
         } catch (err) {
-          // If render throws later, we’ll also catch per-schedule below
           status.textContent = 'Error: ' + (err?.message || String(err));
         }
       });
 
-      // ---------- render ----------
+      // ---------- top-level “Copy Garage JSON (All)” ----------
+      function renderTopCopy(data){
+        if (!Array.isArray(data?.schedules) || !data.schedules.length) return;
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;">
+            <div><b>Bulk copy</b> — top-level object with <code>revenue_schedule</code> array for all items.</div>
+            <button class="btn secondary" id="copyAll">Copy Garage JSON (All)</button>
+          </div>
+        `;
+        bulkCopyContainer.appendChild(card);
+        $('#copyAll').onclick = () => {
+          const all = toGarageAll(data.schedules);
+          navigator.clipboard.writeText(JSON.stringify(all, null, 2)).then(()=>alert('Copied top-level Garage JSON (All)'));
+        };
+      }
+
+      // ---------- per-schedule rendering ----------
       function render(data) {
         (data.schedules || []).forEach((s, i) => {
           try {
-            const conf = s.overall_confidence ?? 0.7;
-            const confClass = conf >= 0.85 ? 'conf-ok' : (conf < 0.6 ? 'conf-bad' : 'conf-warn');
-
-            // Fallbacks (if the model didn’t include them)
             const months = deriveMonthsOfService(s);
             const endDate = computeCalculatedEndDate(s) || s.calculated_end_date || '';
             const totalValue = computeTotalValue(s);
 
             const card = document.createElement('div');
             card.className = 'card';
-
-            // header strip like Garage
             card.innerHTML = `
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
                 <h2>REVENUE SCHEDULE ${i+1}</h2>
-                <span class="pill ${confClass}">Confidence ${Math.round(conf*100)}%</span>
+                <button class="btn secondary" data-idx="${i}">Copy Garage JSON (This item)</button>
               </div>
 
               <div class="sched-header">
@@ -146,8 +164,8 @@
               </div>
 
               <div class="grid-3" style="margin-top:8px;">
-                ${field('Quantity', s.quantity ?? 1)}
                 ${field('Start date', s.start_date ?? '')}
+                ${smallField('Net terms', s.net_terms ?? 0)}
                 ${smallField('# periods', s.periods ?? 1)}
               </div>
 
@@ -156,12 +174,12 @@
                   ${smallField('every', s.frequency_every ?? 1)}
                   ${select('Frequency', FREQ_UNITS, s.frequency_unit ?? 'None')}
                 </div>
-                ${smallField('Net terms', s.net_terms ?? 30)}
+                ${field('Calculated end date', endDate || '')}
               </div>
 
               <div class="grid-2" style="margin-top:8px;">
-                ${field('Calculated end date', endDate || '')}
                 ${field('Calculated subtotal', money(totalValue ?? s.total_price))}
+                ${field('Description', s.description || '')}
               </div>
 
               ${renderOverage(s)}
@@ -172,15 +190,15 @@
               </div>
 
               ${Array.isArray(s.issues) && s.issues.length ? `<div style="margin-top:10px;" class="muted">${s.issues.map(x=>`• ${escapeHtml(safe(x))}`).join('<br/>')}</div>` : ''}
-
-              <div style="margin-top:12px;">
-                <span class="copy" onclick='copyPlan(${JSON.stringify(JSON.stringify(toPlan({...s, calculated_end_date:endDate}))).replace(/'/g,"&#39;")})'>Copy Garage plan</span>
-              </div>
             `;
-
             results.appendChild(card);
+
+            // Wire the per-item copy button
+            card.querySelector('button.btn.secondary').onclick = () => {
+              const one = toGarageRevenue({ ...s, calculated_end_date: endDate });
+              navigator.clipboard.writeText(JSON.stringify(one, null, 2)).then(()=>alert(`Copied Garage JSON for item ${i+1}`));
+            };
           } catch (e) {
-            console.error('Render error on schedule', i+1, e);
             const card = document.createElement('div');
             card.className = 'card';
             card.innerHTML = `<div class="muted">Render error on schedule ${i+1}: ${escapeHtml(safe(e?.message))}</div>`;
@@ -189,16 +207,10 @@
         });
       }
 
-      // ---------- helpers: Garage-ish building blocks ----------
-      function kv(label, value) {
-        return `<div class="fieldset"><span class="label">${escapeHtml(label)}</span><div class="value">${escapeHtml(safe(value))}</div></div>`;
-      }
-      function field(label, value){
-        return `<div><span class="label">${escapeHtml(label)}</span><input value="${escapeHtml(safe(value))}" readonly /></div>`;
-      }
-      function smallField(label, value){
-        return `<div><span class="label">${escapeHtml(label)}</span><input value="${escapeHtml(safe(value))}" readonly /></div>`;
-      }
+      // ---------- helpers: UI blocks ----------
+      function kv(label, value) { return `<div class="fieldset"><span class="label">${escapeHtml(label)}</span><div class="value">${escapeHtml(safe(value))}</div></div>`; }
+      function field(label, value){ return `<div><span class="label">${escapeHtml(label)}</span><input value="${escapeHtml(safe(value))}" readonly /></div>`; }
+      function smallField(label, value){ return `<div><span class="label">${escapeHtml(label)}</span><input value="${escapeHtml(safe(value))}" readonly /></div>`; }
       function select(label, options, value){
         return `<div><span class="label">${escapeHtml(label)}</span>
           <select disabled>${options.map(opt=>`<option ${opt===value?'selected':''}>${escapeHtml(opt)}</option>`).join('')}</select>
@@ -209,18 +221,10 @@
         if (!Number.isFinite(num)) return '';
         return `$${num.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2})}`;
       }
-
-      // SAFETY: always coerce to string before replace()
-      function escapeHtml(s){
-        const str = s === null || s === undefined ? '' : String(s);
-        return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));
-      }
-      function safe(v){ return v === null || v === undefined ? '' : v; }
-      function copyPlan(txt){ navigator.clipboard.writeText(txt).then(()=>alert('Copied! Paste into Garage.')); }
+      function escapeHtml(s){ const str = (s==null)?'':String(s); return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
+      function safe(v){ return v == null ? '' : v; }
 
       // ---------- totals & dates ----------
-      // Total value: quantity ignored (per your rule)
-      // Recurring (Frequency != "None"): price * periods; One-time: price
       function computeTotalValue(s) {
         const price = Number(s?.total_price);
         if (!Number.isFinite(price)) return null;
@@ -228,15 +232,12 @@
         const recurring = (s?.frequency_unit && s.frequency_unit !== 'None');
         return recurring ? price * periods : price;
       }
-
-      // Derive months if not provided
       function deriveMonthsOfService(s) {
         if (Number.isFinite(Number(s?.months_of_service))) return Number(s.months_of_service);
         const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
         const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
         const unit = s?.frequency_unit;
         if (!unit || unit === 'None') return 0;
-
         if (unit === 'Month(s)') return every * periods;
         if (unit === 'Year(s)')  return 12 * every * periods;
         if (unit === 'Week(s)')  return Math.round((7 * every * periods) / 30);
@@ -244,22 +245,16 @@
         if (unit === 'Semi_month(s)') return Math.round((15 * every * periods) / 30);
         return '';
       }
-
-      // Compute end date if missing: start + (every × periods × unit)
       function computeCalculatedEndDate(s) {
         if (s?.calculated_end_date) return s.calculated_end_date;
-        const startStr = s?.start_date;
-        const unit = s?.frequency_unit;
+        const startStr = s?.start_date; const unit = s?.frequency_unit;
         if (!startStr || !unit) return '';
-
         const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
         const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
         const total = every * periods;
-
         try {
           const start = new Date(startStr);
           if (unit === 'None') return formatDate(start);
-
           if (unit === 'Month(s)') return formatDate(addMonths(start, total));
           if (unit === 'Year(s)')  return formatDate(addMonths(start, total * 12));
           if (unit === 'Week(s)')  return formatDate(addDays(start, total * 7));
@@ -268,29 +263,11 @@
           return '';
         } catch { return ''; }
       }
+      function addDays(date, days){ const d=new Date(date.getTime()); d.setDate(d.getDate()+days); return d; }
+      function addMonths(date, months){ const d=new Date(date.getTime()); const day=d.getDate(); d.setDate(1); d.setMonth(d.getMonth()+months); const last=new Date(d.getFullYear(), d.getMonth()+1, 0).getDate(); d.setDate(Math.min(day,last)); return d; }
+      function formatDate(d){ const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const da=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${da}`; }
 
-      function addDays(date, days) {
-        const d = new Date(date.getTime());
-        d.setDate(d.getDate() + days);
-        return d;
-      }
-      function addMonths(date, months) {
-        const d = new Date(date.getTime());
-        const day = d.getDate();
-        d.setDate(1);
-        d.setMonth(d.getMonth() + months);
-        const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-        d.setDate(Math.min(day, last));
-        return d;
-      }
-      function formatDate(d) {
-        const y = d.getFullYear();
-        const m = String(d.getMonth()+1).padStart(2,'0');
-        const da = String(d.getDate()).padStart(2,'0');
-        return `${y}-${m}-${da}`;
-      }
-
-      // ---------- overage/tiers ----------
+      // ---------- overage/tiers (visual only) ----------
       function renderOverage(s) {
         if (!s || s.billing_type === 'Flat price') return '';
         const hasTiers = Array.isArray(s.tiers) && s.tiers.length;
@@ -301,7 +278,7 @@
             ${field('Unit label', s.unit_label ?? '')}
             ${field('Price per unit', s.price_per_unit != null ? money(s.price_per_unit) : '')}
           </div>
-          <div class="muted" style="margin-top:4px;">Price tiers are ${s.volume_based ? 'volume-based' : (s.volume_based === false ? 'not volume-based' : '—')}.</div>
+          <div class="muted" style="margin-top:4px;">${s.volume_based===true?'Volume-based tiers':s.volume_based===false?'Not volume-based':'—'}</div>
         `;
         if (!hasTiers) return base;
 
@@ -320,35 +297,95 @@
         `;
       }
 
-      // ---------- copy plan mapping ----------
-      function toPlan(s){
-        const base = {
-          // Header strip
-          service_start_date: s.start_date || '',
-          total_months_of_service: deriveMonthsOfService(s) || '',
-          calculated_service_end_date: computeCalculatedEndDate(s) || s.calculated_end_date || '',
-          rev_rec_category: s.rev_rec_category || '',
+      // ---------- Garage JSON builders ----------
+      // Map our friendly frequency to your Garage JSON enum set: NONE|DAYS|SEMI_MONTH|YEAR|MONTH|QUARTER
+      function toGarageFrequency(s) {
+        const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
+        const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
+        const unit = s?.frequency_unit;
 
-          // Item & price
-          item_name: s.item_name,
-          billing_type: s.billing_type,
-          total_price: s.total_price ?? null,
-          quantity: s.quantity ?? 1,
-          start_date: s.start_date,
-          periods: s.periods ?? 1,
-          frequency_every: s.frequency_every ?? 1,
-          frequency_unit: s.frequency_unit ?? 'None',
-          net_terms: s.net_terms ?? 30
-        };
+        // one-time
+        if (!unit || unit === 'None') return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
 
-        if (s.billing_type !== 'Flat price') {
-          base.event_to_track = s.event_to_track ?? null;
-          base.unit_label = s.unit_label ?? null;
-          base.price_per_unit = s.price_per_unit ?? null;
-          base.volume_based = s.volume_based ?? null;
-          base.tiers = Array.isArray(s.tiers) ? s.tiers : [];
+        if (unit === 'Month(s)') {
+          if (every === 3) return { frequency_unit: 'QUARTER', period: 1, number_of_periods: periods };
+          return { frequency_unit: 'MONTH', period: every, number_of_periods: periods };
         }
-        return base;
+        if (unit === 'Year(s)')      return { frequency_unit: 'YEAR', period: every, number_of_periods: periods };
+        if (unit === 'Day(s)')       return { frequency_unit: 'DAYS', period: every, number_of_periods: periods };
+        if (unit === 'Semi_month(s)')return { frequency_unit: 'SEMI_MONTH', period: every, number_of_periods: periods };
+        if (unit === 'Week(s)')      return { frequency_unit: 'DAYS', period: every*7, number_of_periods: periods }; // fold weeks into days
+        // default fallback
+        return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
+      }
+
+      function toGarageBillingType(bt) {
+        const map = {
+          'Flat price': 'FLAT_PRICE',
+          'Unit price': 'UNIT_PRICE',
+          'Tier flat price': 'TIER_FLAT_PRICE',
+          'Tier unit price': 'TIER_UNIT_PRICE'
+        };
+        return map[bt] || 'FLAT_PRICE';
+      }
+
+      function toGaragePricingTiers(s) {
+        if (!Array.isArray(s?.tiers) || !s.tiers.length) return [];
+        return s.tiers.map((t, i) => ({
+          tier: Number.isFinite(Number(i+1)) ? (i+1) : null,
+          mantissa: t?.price != null ? String(t.price) : null,
+          exponent: '0',
+          condition_value: Number.isFinite(Number(t?.min_quantity)) ? Number(t.min_quantity) : null,
+          condition_operator: t?.min_quantity != null ? 'GREATER_THAN_EQUAL' : null,
+          name: t?.tier_name || t?.applied_when || null
+        }));
+      }
+
+      // Build one revenue schedule entry for your target schema
+      function toGarageRevenue(s) {
+        const { frequency_unit, period, number_of_periods } = toGarageFrequency(s);
+        const service_term = deriveMonthsOfService(s) || 0;
+        const billing_type = toGarageBillingType(s?.billing_type);
+        const qty = billing_type === 'FLAT_PRICE' ? 1 : null; // quantity is largely irrelevant; follow your rule
+
+        return {
+          service_start_date: s.start_date || '',
+          service_term,
+          revenue_category: null,
+          item_name: s.item_name || '',
+          item_description: s.description || null,
+          start_date: s.start_date || '',
+          frequency_unit,
+          period,
+          number_of_periods,
+          arrears: false,
+          billing_type,
+          event_to_track: s.event_to_track ?? null,
+          integration_item: null,
+          discounts: [],
+          net_terms: Number.isFinite(Number(s?.net_terms)) ? Number(s.net_terms) : 0,
+          quantity: qty,
+          total_price: Number.isFinite(Number(s?.total_price)) ? Number(s.total_price) : 0,
+          pricing_tiers: toGaragePricingTiers(s)
+        };
+      }
+
+      // Build the top-level object with revenue_schedule[]
+      function toGarageAll(schedules) {
+        return {
+          name: "",
+          first_name: null,
+          last_name: null,
+          billing_email: null,
+          street_address_line_1: null,
+          street_address_line_2: null,
+          city: null,
+          state: null,
+          zip_code: null,
+          country: null,
+          accounting_currency: "USD",
+          revenue_schedule: (schedules || []).map(toGarageRevenue)
+        };
       }
     </script>
   </body>

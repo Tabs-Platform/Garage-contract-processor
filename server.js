@@ -11,105 +11,69 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-// Use /tmp for Vercel serverless (only writable directory in production)
+// /tmp is the only writable dir on Vercel; use it in prod
 const uploadDir = process.env.NODE_ENV === 'production' ? '/tmp/uploads/' : 'uploads/';
+try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
 const upload = multer({ dest: uploadDir });
+
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PORT = process.env.PORT || 3000;
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '5mb' }));
 
-// ---------------- Enums that exactly match Garage ----------------
-const BILLING_TYPES = [
-  'Flat price',
-  'Unit price',
-  'Tier flat price',
-  'Tier unit price'
-];
+// ---- Enums aligned with your Garage options for the extractor normalizer ----
+const BILLING_TYPES = ['Flat price','Unit price','Tier flat price','Tier unit price'];
+const FREQ_UNITS   = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year(s)'];
 
-const FREQ_UNITS = [
-  'None',          // one-time
-  'Day(s)',
-  'Week(s)',
-  'Semi_month(s)',
-  'Month(s)',
-  'Year(s)'
-];
-
-// ---------------- Helpers ----------------
+// -------- helpers for normalizing model output --------
 function clampEnum(value, allowed, fallback) {
   if (!value || typeof value !== 'string') return fallback;
   const byLower = new Map(allowed.map(v => [v.toLowerCase(), v]));
   return byLower.get(value.toLowerCase()) || fallback;
 }
-
-function normalizeBillingType(bt, hintFields = {}) {
-  // Default most things to Flat price unless clearly unit/tier.
-  const txt = (bt || '').toLowerCase();
-  if (txt.includes('tier') && txt.includes('unit')) return 'Tier unit price';
-  if (txt.includes('tier') && txt.includes('flat')) return 'Tier flat price';
-  if (txt.includes('unit')) return 'Unit price';
-
-  const { tiers, price_per_unit, unit_label } = hintFields || {};
-  if (Array.isArray(tiers) && tiers.length > 0) {
-    return 'Tier unit price';
-  }
+function normalizeBillingType(bt, hint = {}) {
+  const t = (bt || '').toLowerCase();
+  if (t.includes('tier') && t.includes('unit')) return 'Tier unit price';
+  if (t.includes('tier') && t.includes('flat')) return 'Tier flat price';
+  if (t.includes('unit')) return 'Unit price';
+  const { tiers, price_per_unit, unit_label } = hint || {};
+  if (Array.isArray(tiers) && tiers.length) return 'Tier unit price';
   if (price_per_unit || unit_label) return 'Unit price';
-
   return 'Flat price';
 }
-
-function normalizeFrequency(rawFrequency, rawEvery, rawUnit, fallbackUnit = 'None') {
+function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   let every = Number.isInteger(rawEvery) ? rawEvery : 1;
-  let unit = clampEnum(rawUnit, FREQ_UNITS, null);
-  const txt = (rawFrequency || '').toLowerCase();
+  let unit  = clampEnum(rawUnit, FREQ_UNITS, null);
+  const txt = (rawText || '').toLowerCase();
 
   if (!unit) {
-    if (!txt || txt === 'none' || txt.includes('one-time') || txt.includes('one time')) {
-      unit = 'None'; every = 1;
-    } else if (txt.includes('annual')) {
-      unit = 'Year(s)'; every = 1;
-    } else if (txt.includes('month')) {
-      unit = 'Month(s)'; every = 1;
-    } else if (txt.includes('week')) {
-      unit = 'Week(s)'; every = 1;
-    } else if (txt.includes('semi')) {
-      unit = 'Semi_month(s)'; every = 1;
-    } else if (txt.includes('day')) {
-      unit = 'Day(s)'; every = 1;
-    } else {
-      unit = fallbackUnit;
-    }
+    if (!txt || txt === 'none' || txt.includes('one-time')) { unit = 'None'; every = 1; }
+    else if (txt.includes('annual'))  { unit = 'Year(s)';  every = 1; }
+    else if (txt.includes('month'))   { unit = 'Month(s)'; every = 1; }
+    else if (txt.includes('week'))    { unit = 'Week(s)';  every = 1; }
+    else if (txt.includes('semi'))    { unit = 'Semi_month(s)'; every = 1; }
+    else if (txt.includes('day'))     { unit = 'Day(s)';   every = 1; }
+    else unit = fallback;
   }
   if (unit === 'None') every = 1;
   return { every, unit };
 }
-
 function pickNumber(n, fallback = null) {
   const x = Number(n);
   return Number.isFinite(x) ? x : fallback;
 }
-
-// compute Total value (Garage “Calculated subtotal” style)
 function computeTotalValue(s) {
-  const qty = pickNumber(s.quantity, 1);
-  // One-time means periods = 1
+  // Review-only; not sent in Garage JSON
   const periods = s.frequency_unit === 'None' ? 1 : pickNumber(s.periods, 1);
-
-  // If we have a per-period "total_price", use that
-  const price = pickNumber(s.total_price, null);
-  if (price != null) return +(price * qty * periods).toFixed(2);
-
-  // If price_per_unit is available (usage/unit pricing)
+  const price   = pickNumber(s.total_price, null);
+  if (price != null) return +(price * periods).toFixed(2);
   const ppu = pickNumber(s.price_per_unit, null);
-  if (ppu != null) return +(ppu * qty * periods).toFixed(2);
-
-  // Tiered/unknown — can't reliably compute
+  if (ppu != null) return +(ppu * periods).toFixed(2);
   return null;
 }
 
-// ------------- Prompt with Garage-specific rules -------------
+// -------- prompt tuned to enumerate multi-schedules & return JSON only --------
 function buildSystemPrompt(forceMulti = 'auto') {
   const multiHint =
     forceMulti === 'on'
@@ -125,8 +89,8 @@ Given a contract PDF, enumerate EVERY billable item and map each to Garage field
 
 ${multiHint}
 
-OUTPUT (IMPORTANT):
-Return ONE JSON object with:
+OUTPUT:
+Return ONE JSON object only (no prose) with:
 {
   "schedules": [
     {
@@ -152,39 +116,27 @@ Return ONE JSON object with:
       "price_per_unit": number|null,
       "volume_based": boolean|null,
       "tiers": [
-        {
-          "tier_name": "string|null",
-          "price": number|null,
-          "applied_when": "string|null",
-          "min_quantity": number|null
-        }
+        { "tier_name":"string|null","price":number|null,"applied_when":"string|null","min_quantity":number|null }
       ],
 
-      "evidence": [{"page": number, "snippet": "string"}],
-      "confidences": {"field": number, "...": number},
-      "overall_confidence": number
+      "evidence": [{ "page": number, "snippet": "string" }]
     }
   ],
   "issues": ["string", "..."],
-  "totals_check": {
-    "sum_of_items": number|null,
-    "contract_total_if_any": number|null,
-    "matches": boolean|null,
-    "notes": "string|null"
-  },
+  "totals_check": { "sum_of_items": number|null, "contract_total_if_any": number|null, "matches": boolean|null, "notes": "string|null" },
   "model_recommendations": { "force_multi": boolean|null, "reasons": ["string", "..."] }
 }
+
 Rules:
 - Billing type MUST be one of: "Flat price", "Unit price", "Tier flat price", "Tier unit price".
-- Frequency unit MUST be one of: "None", "Day(s)", "Week(s)", "Semi_month(s)", "Month(s)", "Year(s)".
-- Quantity: for one-time **Flat price** items, default to **1** unless the contract explicitly states the fee is charged per multiple units. If you set quantity > 1 for Flat price, include strong evidence; otherwise set 1 and add an issue explaining why.
-- If billing type is Unit or Tier-Unit, include event_to_track, unit_label, and either price_per_unit or tiers[].
+- Frequency unit MUST be one of: "None","Day(s)","Week(s)","Semi_month(s)","Month(s)","Year(s)".
+- For one-time Flat price, default quantity=1 unless the contract explicitly says otherwise.
+- If Unit or Tier, include event_to_track, unit_label, and price_per_unit or tiers[].
 - Include page+snippet evidence for every extracted price/date line.
-- If uncertain, include the field but set it to null and add an issue.
-- Return JSON only, no prose.`;
+- If uncertain about a field, set it to null and add an issue.`;
 }
 
-// ---------------- Health endpoint ----------------
+// ---- healthcheck (also confirms API key) ----
 app.get('/health', async (_req, res) => {
   try {
     const models = await client.models.list();
@@ -194,91 +146,54 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-// ---------------- Main extraction endpoint ----------------
+// ---- main extraction ----
 app.post('/api/extract', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
-  console.log('Upload received:', {
-    originalname: req.file.originalname,
-    mimetype: req.file.mimetype,
-    size: req.file.size
-  });
+  console.log('Upload received:', { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size });
 
   try {
     const { model = 'o3', forceMulti = 'auto' } = req.query;
     const chosenModel = ['o3','o4-mini','gpt-4o-mini','o3-mini'].includes(model) ? model : 'o3';
 
-    // 1) Upload PDF to Files API with a proper name
+    // 1) Upload PDF with a real filename so the API knows it's a PDF
     const uploaded = await client.files.create({
-      file: await toFile(
-        fs.createReadStream(req.file.path),
-        req.file.originalname || 'contract.pdf'
-      ),
+      file: await toFile(fs.createReadStream(req.file.path), req.file.originalname || 'contract.pdf'),
       purpose: 'assistants'
     });
     console.log('OpenAI file_id:', uploaded.id);
 
-    // 2) Ask the model for a plain JSON object
+    // 2) Ask for a single JSON object
     const response = await client.responses.create({
       model: chosenModel,
       input: [
         { role: 'system', content: buildSystemPrompt(forceMulti) },
-        {
-          role: 'user',
-          content: [
+        { role: 'user',   content: [
             { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
             { type: 'input_file', file_id: uploaded.id }
-          ]
-        }
+        ] }
       ],
       text: { format: { type: 'json_object' } }
     });
 
-    // 3) Parse and normalize
+    // 3) Parse and normalize (drop any confidence fields)
     const raw = response.output_text ?? JSON.stringify(response);
     let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
+    try { data = JSON.parse(raw); }
+    catch {
       const a = raw.indexOf('{'); const b = raw.lastIndexOf('}');
-      data = a >= 0 && b > a ? JSON.parse(raw.slice(a, b + 1)) : { schedules: [], issues: [`Could not parse model JSON`] };
+      data = (a >= 0 && b > a) ? JSON.parse(raw.slice(a, b + 1)) : { schedules: [], issues: ['Could not parse model JSON'] };
     }
 
     const schedules = Array.isArray(data.schedules) ? data.schedules : [];
     const normalized = schedules.map((s) => {
-      // Start with any model-supplied issues
       const issues = Array.isArray(s.issues) ? [...s.issues] : [];
 
-      const bt = clampEnum(
-        normalizeBillingType(s.billing_type, s),
-        BILLING_TYPES,
-        'Flat price'
-      );
+      const bt = clampEnum(normalizeBillingType(s.billing_type, s), BILLING_TYPES, 'Flat price');
+      const { every, unit } = normalizeFrequency(s.frequency, s.frequency_every, s.frequency_unit, 'None');
 
-      const { every, unit } = normalizeFrequency(
-        s.frequency,
-        s.frequency_every,
-        s.frequency_unit,
-        'None'
-      );
-
-      // ---- Quantity heuristic for Flat price ----
+      // Quantity heuristic: default Flat price to 1; otherwise leave as provided or null
       let qty = pickNumber(s.quantity, null);
-      if (bt === 'Flat price') {
-        if (qty == null || qty > 1) {
-          const desc = `${s.description || ''} ${s.item_name || ''}`.toLowerCase();
-          const looksLikePerUnitMention = /\bx\s*\d+\b|\b\d+\s*(seats?|licenses?|users?)\b/.test(desc);
-          if (qty !== 1) {
-            issues.push(
-              `Quantity normalized to 1 for Flat price (model suggested "${qty}"${looksLikePerUnitMention ? ' based on descriptive copy' : ''}).`
-            );
-          }
-          qty = 1;
-        }
-      }
-
-      // Rev-rec category: leave null by default (you can set in Garage later)
-      const revRec = s.rev_rec_category ?? null;
+      if (bt === 'Flat price') qty = 1;
 
       const out = {
         schedule_label: s.schedule_label ?? null,
@@ -295,10 +210,9 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
         months_of_service: pickNumber(s.months_of_service, null),
         periods: pickNumber(s.periods, 1),
         calculated_end_date: s.calculated_end_date || null,
-        net_terms: pickNumber(s.net_terms, 30),
-        rev_rec_category: revRec,
+        net_terms: pickNumber(s.net_terms, 0),
+        rev_rec_category: s.rev_rec_category ?? null,
 
-        // overage / usage specifics
         event_to_track: s.event_to_track ?? null,
         unit_label: s.unit_label ?? null,
         price_per_unit: pickNumber(s.price_per_unit, null),
@@ -313,16 +227,11 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
           : [],
 
         evidence: Array.isArray(s.evidence) ? s.evidence.slice(0, 8) : [],
-        confidences: s.confidences || {},
-        overall_confidence: pickNumber(s.overall_confidence, 0.7),
         issues
       };
 
-      // Derived: total_value (Garage “Calculated subtotal” style)
+      // Derived, for UI only (not returned in Garage JSON)
       out.total_value = computeTotalValue(out);
-      if (out.total_value == null && (out.billing_type.includes('Tier') || (out.tiers||[]).length)) {
-        out.issues.push('Total value not computed for tiered pricing (depends on actual usage).');
-      }
       return out;
     });
 
@@ -350,10 +259,8 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
   }
 });
 
-// For local development
+// local dev; on Vercel we export the handler
 if (process.env.NODE_ENV !== 'production') {
   app.listen(PORT, () => console.log(`Garage assistant running on http://localhost:${PORT}`));
 }
-
-// Export for Vercel serverless
 export default app;
