@@ -32,16 +32,52 @@ function clampEnum(value, allowed, fallback) {
   const byLower = new Map(allowed.map(v => [v.toLowerCase(), v]));
   return byLower.get(value.toLowerCase()) || fallback;
 }
+
+// Detect “Luxury Presence” from item text or evidence
+function isLuxuryPresenceHint(s) {
+  const parts = []
+    .concat(s?.item_name || [], s?.description || [])
+    .concat(Array.isArray(s?.evidence) ? s.evidence.map(e => e?.snippet || '') : []);
+  const hay = parts.join(' ').toLowerCase();
+  return /luxury\s+presence/.test(hay); // strict and safe
+}
+
+// Require strong evidence before accepting Unit/Tier usage pricing
+function hasStrongUnitEvidence(s) {
+  const parts = []
+    .concat(s?.item_name || [], s?.description || [], s?.unit_label || [])
+    .concat(Array.isArray(s?.evidence) ? s.evidence.map(e => e?.snippet || '') : []);
+  const hay = parts.join(' ').toLowerCase();
+  const perPattern = /\b(per|each|\/)\s*(seat|user|impression|click|lead|unit|order|transaction|visit|listing|ad|sku|gb|hour|minute|api call|api|sms|email|message|device|location|month|year)s?\b/;
+  const usageWords = /\b(overage|usage|metered|consumption|rate\s*card|per[-\s]*use)\b/;
+  const hasPPU = Number.isFinite(Number(s?.price_per_unit));
+  const hasUnitLabel = !!(s?.unit_label && String(s.unit_label).trim());
+  const tierCount = Array.isArray(s?.tiers) ? s.tiers.length : 0;
+
+  // “Strong” = explicit per-X/usage wording, OR clear rate (ppu + unit), OR actual tiers
+  return perPattern.test(hay) || usageWords.test(hay) || (hasPPU && hasUnitLabel) || tierCount > 0;
+}
+
+// Tighten the billing type normalizer: prefer Flat unless there’s strong proof
 function normalizeBillingType(bt, hint = {}) {
+  // Brand rule first
+  if (isLuxuryPresenceHint(hint)) return 'Flat price';
+
+  // If real tiers, treat as tiered (likely unit-priced tiers)
+  if (Array.isArray(hint?.tiers) && hint.tiers.length) return 'Tier unit price';
+
+  // Only accept Unit price if there is strong usage/per-unit evidence
+  if (hasStrongUnitEvidence(hint)) return 'Unit price';
+
+  // Fall back on the literal label if it clearly names a tier type
   const t = (bt || '').toLowerCase();
   if (t.includes('tier') && t.includes('unit')) return 'Tier unit price';
   if (t.includes('tier') && t.includes('flat')) return 'Tier flat price';
-  if (t.includes('unit')) return 'Unit price';
-  const { tiers, price_per_unit, unit_label } = hint || {};
-  if (Array.isArray(tiers) && tiers.length) return 'Tier unit price';
-  if (price_per_unit || unit_label) return 'Unit price';
+
+  // Otherwise, default to Flat price (safe, conservative)
   return 'Flat price';
 }
+
 function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   let every = Number.isInteger(rawEvery) ? rawEvery : 1;
   let unit  = clampEnum(rawUnit, FREQ_UNITS, null);
@@ -88,6 +124,12 @@ TASK:
 Given a contract PDF, enumerate EVERY billable item and map each to Garage fields for Revenue Schedules. If anything is ambiguous, return a conservative result and add an issue explaining what to check.
 
 ${multiHint}
+
+BRAND POLICY & ANTI-HALLUCINATION RULES:
+- "Luxury Presence" contracts are NEVER usage- or unit-priced. For ANY item tied to Luxury Presence, set billing_type="Flat price", quantity=1, and leave event_to_track, unit_label, price_per_unit and tiers NULL/empty. Do NOT infer them.
+- DEFAULT to "Flat price" when ambiguous. Only choose "Unit price" or "Tier*" when you can QUOTE explicit per-unit/usage language from the contract (e.g., "per user", "per seat", "per lead", "per impression", "overage", "usage", or an explicit rate card like "$X per Y").
+- If you cannot provide such evidence in the evidence[].snippet for that item, use "Flat price" instead and add an issue describing the ambiguity.
+- Never populate event_to_track unless the contract explicitly defines the tracked event; otherwise keep it null.
 
 OUTPUT:
 Return ONE JSON object only (no prose) with:
@@ -155,16 +197,21 @@ function parseModelJson(apiResponse) {
     return (a >= 0 && b > a) ? JSON.parse(raw.slice(a, b + 1)) : { schedules: [], issues: ['Could not parse model JSON'] };
   }
 }
+
 function normalizeSchedules(data) {
   const schedules = Array.isArray(data?.schedules) ? data.schedules : [];
   return schedules.map((s) => {
     const issues = Array.isArray(s.issues) ? [...s.issues] : [];
-    const bt = clampEnum(normalizeBillingType(s.billing_type, s), BILLING_TYPES, 'Flat price');
+
+    // 1) Determine billing type with stricter heuristics + brand rule
+    let bt = clampEnum(normalizeBillingType(s.billing_type, s), BILLING_TYPES, 'Flat price');
+
+    // 2) Frequency normalization
     const { every, unit } = normalizeFrequency(s.frequency, s.frequency_every, s.frequency_unit, 'None');
 
-    // Quantity heuristic: default Flat price to 1; otherwise leave as provided or null
+    // 3) Base object
     let qty = pickNumber(s.quantity, null);
-    if (bt === 'Flat price') qty = 1;
+    if (bt === 'Flat price') qty = 1; // default quantity for flat price
 
     const out = {
       schedule_label: s.schedule_label ?? null,
@@ -200,6 +247,37 @@ function normalizeSchedules(data) {
       evidence: Array.isArray(s.evidence) ? s.evidence.slice(0, 8) : [],
       issues
     };
+
+    // 4) Enforce Luxury Presence policy & anti‑guessing guardrails
+    if (isLuxuryPresenceHint(s)) {
+      out.billing_type = 'Flat price';
+      out.quantity = 1;
+      out.event_to_track = null;
+      out.unit_label = null;
+      out.price_per_unit = null;
+      out.volume_based = null;
+      out.tiers = [];
+      out.issues.push('Policy: Luxury Presence contracts are Flat price only; cleared unit/usage fields.');
+    } else {
+      // Demote weak “Unit price” guesses to Flat price
+      if (out.billing_type === 'Unit price' && !hasStrongUnitEvidence(s)) {
+        out.billing_type = 'Flat price';
+        out.quantity = 1;
+        out.event_to_track = null;
+        out.unit_label = null;
+        out.price_per_unit = null;
+        out.volume_based = null;
+        out.tiers = [];
+        out.issues.push('Demoted Unit → Flat: missing explicit per-unit/usage evidence.');
+      }
+      // If Tier type but no actual tiers, demote to Flat price
+      if ((out.billing_type === 'Tier unit price' || out.billing_type === 'Tier flat price') && (!out.tiers || out.tiers.length === 0)) {
+        out.billing_type = 'Flat price';
+        out.quantity = 1;
+        out.issues.push('Demoted Tier → Flat: no tiers found.');
+      }
+    }
+
     // Derived, for UI only (not returned in Garage JSON)
     out.total_value = computeTotalValue(out);
     return out;
@@ -226,7 +304,7 @@ function numericSimilarity(a, b) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return 0;
   const diff = Math.abs(x - y);
   const denom = Math.max(1, Math.abs(x), Math.abs(y));
-  return clamp01(1 - diff / denom);
+  return clamp01(1 - diff / denom); // relative difference
 }
 function dateSimilarity(a, b) {
   if (!a && !b) return 1;
