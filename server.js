@@ -406,7 +406,7 @@ function computeAgreement(first, second) {
 }
 
 /* ----------------------------------------------------------------------------
-   SERVER-SIDE Garage JSON (strict) — produces the final objects your friend needs
+   SERVER-SIDE Garage JSON (strict) — produces the final objects the endpoint needs
 ---------------------------------------------------------------------------- */
 function toGarageBillingType(bt) {
   const map = { 'Flat price': 'FLAT_PRICE', 'Unit price': 'UNIT_PRICE', 'Tier flat price': 'TIER_FLAT_PRICE', 'Tier unit price': 'TIER_UNIT_PRICE' };
@@ -589,7 +589,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 });
 
 /* ----------------------------------------------------------------------------
-   /api/use-contract-assistant (GET) — your friend's endpoint.
+   /api/use-contract-assistant (GET) — The endpoint.
    Default = wrapped array; add &format=full for verbose debug.
 ---------------------------------------------------------------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
