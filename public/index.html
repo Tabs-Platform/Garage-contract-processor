@@ -95,6 +95,132 @@
       const BILLING_TYPES = ['Flat price','Unit price','Tier flat price','Tier unit price'];
       const FREQ_UNITS = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year(s)'];
 
+      // ---------------- ITEM_NAME → INTEGRATION_ITEM map (client-side only) ----------------
+      // Right column (Item Name) → Left column (Integration Id)
+      // Exact, case-insensitive match. You can add/fix rows here any time without redeploying server code.
+      const INTEGRATION_BY_ITEM = new Map([
+        ['Ad Spend ($500)', 'Ad Spend'],
+        ['Ad Spend ($1,000)', 'Ad Spend'],
+        ['Ad Spend Add On', 'Ad Spend Add On'],
+        ['Presence Platform User Seat', 'Additional User Seat'],
+        ['Additional Website Page', 'Additional Website Page'],
+        ['Agent Bio', 'Agent Bio'],
+        ['Agent Landing Pages', 'Agent Landing Pages'],
+        ['Standard User Seat', 'Agent Subdomains'],
+        ['AI Advertising Specialist', 'AI Advertising Specialist'],
+        ['AI Blog Specialist', 'AI Blog Specialist'],
+        ['AI Lead Nurture', 'AI Lead Nurture'],
+        ['AI SEO Specialist', 'AI SEO Specialist'],
+        ['All In', 'All In'],
+        ['All In Premier', 'All In Premier'],
+        ['Base', 'Base'],
+        ['Bespoke Website', 'Bespoke Website'],
+        ['Blog Migration', 'Blog Migration'],
+        ['Brand', 'Brand'],
+        ['Brand+', 'Brand+'],
+        ['Collective by Luxury Presence', 'Collective by Luxury Presence'],
+        ['Branded Mobile App User Seat', 'Copilot (White-Label) Additional Agent Seat'],
+        ['Branded Mobile App Activation', 'Copilot Activation (White-Label)'],
+        ['Luxury Presence Mobile App User Seat', 'Copilot Agent Seat'],
+        ['Branded Mobile App Subscription', 'Copilot Subscription (White-Label)'],
+        ['Design Change (Pro)', 'Design Change (within Pro)'],
+        ['Design Change (Custom)', 'Design Change to Custom'],
+        ['Design Refresh', 'Design Refresh'],
+        ['Dev Hours', 'Dev Hours'],
+        ['Development Website (Monthly)', 'Development Website (Monthly)'],
+        ['One-Time Setup Fee (Development)', 'Development Website (One-Time Setup Fee)'],
+        ['Domain Forwarding', 'Domain Forwarding'],
+        ['Enterprise', 'Enterprise'],
+        ['Enterprise Features', 'Enterprise Features'],
+        ['Feed Integration Partner', 'Feed Integration Partner'],
+        ['Growth+', 'Growth+'],
+        ['IDX Tool', 'IDX Tool'],
+        ['Launch', 'Launch'],
+        ['Launch+', 'Launch+'],
+        ['Lead Gen Ads', 'Lead Gen Ads'],
+        ['Lead Gen Ads (Premier)', 'Lead Gen Ads (Premier)'],
+        ['Leads Premier', 'Leads Premier'],
+        ['Leads Pro', 'Leads Pro'],
+        ['Press Migration', 'N/A (did not exist previously)'],
+        ['Neighborhood Migration', 'N/A (did not exist previously)'],
+        ['Development Migration', 'N/A (did not exist previously)'],
+        ['Testimonial Migration', 'N/A (did not exist previously)'],
+        ['Neighborhood Copy', 'Neighborhood Copy'],
+        ['Neighborhood Guide', 'Neighborhood Guide'],
+        ['One-Click Property Websites', 'One-Click Property Websites'],
+        ['One-Time Setup Fee (All In Premier Custom)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (All In Premier)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Brand+ & Custom)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Brand+ & Pro)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Launch+ & Custom)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Launch+ & Pro)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Leads Premier Custom)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Leads Premier)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Leads Pro & Custom)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Leads Pro & Pro)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Presence Premier Custom)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (Presence Premier)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (SEO Premier Custom)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (SEO Premier)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (SEO Pro & Custom)', 'One-Time Setup Fee'],
+        ['One-Time Setup Fee (SEO Pro & Pro)', 'One-Time Setup Fee'],
+        ['Opening Video', 'Opening Video'],
+        ['Pages of Copywriting', 'Pages of Copywriting'],
+        ['Premium Support', 'Premium Support'],
+        ['Premium+', 'Premium+'],
+        ['Presence Premier', 'Presence Premier'],
+        ['Property Migration', 'Property Migration'],
+        ['Remove LP Link in Footer', 'Remove LP Link in Footer'],
+        ['Self-Serve Property Website (Monthly)', 'Self-Serve Property Website (Monthly)'],
+        ['One-Time Setup Fee (Self-Serve Property Website)', 'Self-Serve Property Website (One-Time Setup Fee)'],
+        ['SEO Blog Post', 'SEO Blog Post'],
+        ['SEO Migration', 'SEO Migration'],
+        ['SEO Premier', 'SEO Premier'],
+        ['SEO Pro', 'SEO Pro'],
+        ['Social Media', 'Social Media'],
+        ['Template Change', 'Template Change'],
+        ['Video Editing', 'Video Editing'],
+        ['12 Blogs per Quarter', '12 Blogs per Quarter'],
+        ['6 Blogs per Quarter', '6 Blogs per Quarter'],
+        ['Performance SEO Add On', 'Editorial SEO Add On'],
+        ['Premium User Seat', 'Premium User Seat'],
+      ].map(([itemName, integrationId]) => [itemName.toLowerCase().trim(), integrationId])
+      );
+
+      // For light fuzzy matching (e.g., stray spaces, punctuation variants)
+      function canonicalizeName(s) {
+        return String(s || '')
+          .toLowerCase()
+          .replace(/&/g, 'and')
+          .replace(/[^a-z0-9\s+]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+      function mapIntegrationItem(itemName) {
+        if (!itemName) return null;
+        const exact = INTEGRATION_BY_ITEM.get(itemName.toLowerCase().trim());
+        if (exact) return exact;
+
+        // fuzzy-ish: try canonical form
+        const canon = canonicalizeName(itemName);
+        // build a small lookup index the first time
+        if (!mapIntegrationItem._idx) {
+          mapIntegrationItem._idx = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => ({
+            rawKey: k, canonKey: canonicalizeName(k), val: v
+          }));
+        }
+        const hit = mapIntegrationItem._idx.find(e => e.canonKey === canon);
+        return hit ? hit.val : null;
+      }
+      function applyIntegrationMap(schedules) {
+        (schedules || []).forEach(s => {
+          const already = s?.integration_item;
+          if (already && String(already).trim()) return; // don't overwrite if model already set it
+          const mapped = mapIntegrationItem(s?.item_name);
+          if (mapped) s.integration_item = mapped;
+        });
+      }
+
       const $ = (s) => document.querySelector(s);
       const results = $('#results');
       const status = $('#status');
@@ -119,6 +245,9 @@
           const ct = res.headers.get('content-type') || '';
           const payload = ct.includes('application/json') ? await res.json() : { error: await res.text() };
           if (!res.ok) throw new Error(payload?.debug?.message || payload?.error || 'Request failed');
+
+          // >>> APPLY CLIENT-SIDE INTEGRATION MAPPING <<<
+          applyIntegrationMap(payload.schedules);
 
           const flagged = (payload.schedules||[]).filter(s => s.flag_for_review).length;
           const avg = payload?.agreement_summary?.avg_confidence != null ? (payload.agreement_summary.avg_confidence*100).toFixed(0)+'%' : '—';
@@ -218,7 +347,7 @@
             `;
             results.appendChild(card);
 
-            // Wire the per-item copy button (always Run #1)
+            // Wire the per-item copy button (includes client-side integration_item)
             card.querySelector('button.btn.secondary').onclick = () => {
               const one = toGarageRevenue({ ...s, calculated_end_date: endDate });
               navigator.clipboard.writeText(JSON.stringify(one, null, 2)).then(()=>alert(`Copied Garage JSON for item ${i+1}`));
@@ -253,7 +382,7 @@
         if (conf == null) return `<span class="chip">Confidence: —</span>`;
         const pct = Math.round(conf*100);
         const cls = flagged ? 'bad' : (pct >= 90 ? 'good' : pct >= 75 ? 'warn' : 'bad');
-        const label = flagged ? 'Needs review' : (pct >= 90 ? 'High' : pct >= 75 ? 'Medium' : 'Low');
+        const label = flagged ? 'Needs review' : (pct >= 90 ? 'High' : 'Medium');
         return `<span class="chip ${cls}"><b>${label}</b> • ${pct}%</span>`;
       }
       function renderAgreementBlock(s){
@@ -344,13 +473,11 @@
       }
 
       // ---------- Garage JSON builders ----------
-      // Map our friendly frequency to your Garage JSON enum set: NONE|DAYS|SEMI_MONTH|YEAR|MONTH|QUARTER
       function toGarageFrequency(s) {
         const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
         const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
         const unit = s?.frequency_unit;
 
-        // one-time
         if (!unit || unit === 'None') return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
 
         if (unit === 'Month(s)') {
@@ -360,8 +487,7 @@
         if (unit === 'Year(s)')      return { frequency_unit: 'YEAR', period: every, number_of_periods: periods };
         if (unit === 'Day(s)')       return { frequency_unit: 'DAYS', period: every, number_of_periods: periods };
         if (unit === 'Semi_month(s)')return { frequency_unit: 'SEMI_MONTH', period: every, number_of_periods: periods };
-        if (unit === 'Week(s)')      return { frequency_unit: 'DAYS', period: every*7, number_of_periods: periods }; // fold weeks into days
-        // default fallback
+        if (unit === 'Week(s)')      return { frequency_unit: 'DAYS', period: every*7, number_of_periods: periods };
         return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
       }
 
@@ -378,7 +504,7 @@
       function toGaragePricingTiers(s) {
         if (!Array.isArray(s?.tiers) || !s.tiers.length) return [];
         return s.tiers.map((t, i) => ({
-          tier: Number.isFinite(Number(i+1)) ? (i+1) : null,
+          tier: i+1,
           mantissa: t?.price != null ? String(t.price) : null,
           exponent: '0',
           condition_value: Number.isFinite(Number(t?.min_quantity)) ? Number(t.min_quantity) : null,
@@ -387,12 +513,16 @@
         }));
       }
 
-      // Build one revenue schedule entry for your target schema
       function toGarageRevenue(s) {
         const { frequency_unit, period, number_of_periods } = toGarageFrequency(s);
         const service_term = deriveMonthsOfService(s) || 0;
         const billing_type = toGarageBillingType(s?.billing_type);
-        const qty = billing_type === 'FLAT_PRICE' ? 1 : null; // quantity is largely irrelevant; follow your rule
+        const qty = billing_type === 'FLAT_PRICE' ? 1 : (Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : null);
+
+        // ensure integration_item is applied client-side too (belt & suspenders)
+        const integration_item = (s?.integration_item && String(s.integration_item).trim())
+          ? s.integration_item
+          : mapIntegrationItem(s?.item_name);
 
         return {
           service_start_date: s.start_date || '',
@@ -407,16 +537,15 @@
           arrears: false,
           billing_type,
           event_to_track: s.event_to_track ?? null,
-          integration_item: null,
+          integration_item: integration_item ?? null,
           discounts: [],
           net_terms: Number.isFinite(Number(s?.net_terms)) ? Number(s.net_terms) : 0,
-          quantity: qty,
+          quantity: qty ?? 1,
           total_price: Number.isFinite(Number(s?.total_price)) ? Number(s.total_price) : 0,
           pricing_tiers: toGaragePricingTiers(s)
         };
       }
 
-      // Build the top-level array of revenue_schedule[]
       function toGarageAll(schedules) {
         return (schedules || []).map(toGarageRevenue);
       }
