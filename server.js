@@ -28,7 +28,7 @@ const BILLING_TYPES = ['Flat price','Unit price','Tier flat price','Tier unit pr
 const FREQ_UNITS   = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year(s)'];
 
 /* ----------------------------------------------------------------------------
-   ITEM NAME  →  INTEGRATION ITEM  (server-side mapping, same as client)
+   ITEM NAME  →  INTEGRATION ITEM  (server-side mapping)
    Always prefer this mapping over any integration_item from the model.
 ---------------------------------------------------------------------------- */
 const INTEGRATION_PAIRS = [
@@ -125,6 +125,8 @@ function canonicalizeName(s) {
   let t = String(s || '').toLowerCase();
   t = t.replace(/&/g, 'and');
   t = t.replace(/[^a-z0-9]/g, ' ');
+  // treat “add-on / addon” as noise so “Agent Landing Pages (Add-On)” ≈ “Agent Landing Pages”
+  t = t.replace(/\b(add[-\s]?on|addon)s?\b/g, '');
   t = t.replace(/\s+/g, ' ').trim();
   t = t.replace(/(\d)\s+(?=\d)/g, '$1'); // remove spaces between digits (1 000 -> 1000)
   return t;
@@ -142,8 +144,8 @@ function mapIntegrationItem(itemName) {
 }
 
 /* ----------------------------------------------------------------------------
-   Normalization + anti-hallucination (base from your current server)      ──
-   (Luxury Presence rule, prefer Flat unless strong per‑unit evidence)        */
+   Normalization + anti-hallucination (prefer Flat; Luxury Presence = Flat)
+---------------------------------------------------------------------------- */
 function clampEnum(value, allowed, fallback) {
   if (!value || typeof value !== 'string') return fallback;
   const byLower = new Map(allowed.map(v => [v.toLowerCase(), v]));
@@ -207,7 +209,7 @@ function computeTotalValue(s) {
 }
 
 /* ----------------------------------------------------------------------------
-   System prompt (kept as in your server; includes brand + anti-usage rules)
+   System prompt (brand rule + anti-usage bias)
 ---------------------------------------------------------------------------- */
 function buildSystemPrompt(forceMulti = 'auto') {
   const multiHint =
@@ -340,7 +342,7 @@ function normalizeSchedules(data) {
 }
 
 /* ----------------------------------------------------------------------------
-   AGREEMENT / CONFIDENCE (unchanged)
+   AGREEMENT / CONFIDENCE
 ---------------------------------------------------------------------------- */
 function clamp01(x){ return Math.max(0, Math.min(1, Number(x)||0)); }
 function tokenize(s) { if (!s) return []; return String(s).toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(x => x && x.length > 1); }
@@ -404,7 +406,7 @@ function computeAgreement(first, second) {
 }
 
 /* ----------------------------------------------------------------------------
-   SERVER-SIDE Garage JSON (strict) — mirrors UI, produces array-only
+   SERVER-SIDE Garage JSON (strict) — produces the final objects your friend needs
 ---------------------------------------------------------------------------- */
 function toGarageBillingType(bt) {
   const map = { 'Flat price': 'FLAT_PRICE', 'Unit price': 'UNIT_PRICE', 'Tier flat price': 'TIER_FLAT_PRICE', 'Tier unit price': 'TIER_UNIT_PRICE' };
@@ -415,7 +417,6 @@ function inferNumberOfPeriods(s, unit, every, periods) {
   if (Number.isFinite(p) && p > 0) return p;
 
   const mos = Number(s?.months_of_service);
-  // try to infer from months_of_service
   if (Number.isFinite(mos) && mos > 0) {
     if (unit === 'Month(s)') return Math.max(1, Math.round(mos / (every || 1)));
     if (unit === 'Year(s)')  return Math.max(1, Math.round(mos / (12 * (every || 1))));
@@ -423,7 +424,6 @@ function inferNumberOfPeriods(s, unit, every, periods) {
     if (unit === 'Day(s)')   return Math.max(1, Math.round((mos * 30) / (1 * (every || 1))));
     if (unit === 'Semi_month(s)') return Math.max(1, Math.round((mos * 30) / (15 * (every || 1))));
   }
-  // fallback: if recurring, at least 1; if one-time, 0
   return (unit && unit !== 'None') ? 1 : 0;
 }
 function toGarageFrequency(s) {
@@ -455,7 +455,6 @@ function toGaragePricingTiers(s) {
     name: t?.tier_name || t?.applied_when || null
   }));
 }
-// Optional polish: standardize the one‑time line name/description if it's obviously a one‑time bucket
 function polishOneTimeNameAndDescription(s, g) {
   const text = [s?.schedule_label, s?.item_name, s?.description, s?.rev_rec_category].filter(Boolean).join(' ').toLowerCase();
   const isOneTime = g.frequency_unit === 'NONE' || /one[-\s]?time|setup|implementation|professional services/.test(text);
@@ -464,7 +463,6 @@ function polishOneTimeNameAndDescription(s, g) {
     g.item_description = 'Total one-time fees listed on order form';
   }
 }
-
 function deriveMonthsOfService(s) {
   if (Number.isFinite(Number(s?.months_of_service))) return Number(s.months_of_service);
   const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
@@ -478,13 +476,11 @@ function deriveMonthsOfService(s) {
   if (unit === 'Semi_month(s)') return Math.round((15 * every * periods) / 30);
   return 0;
 }
-
 function toGarageRevenueStrict(s) {
   const { frequency_unit, period, number_of_periods } = toGarageFrequency(s);
   const service_term = deriveMonthsOfService(s) || 0;
   const billing_type = toGarageBillingType(s?.billing_type);
   const qty = billing_type === 'FLAT_PRICE' ? 1 : (Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : null);
-
   const integration_item = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
 
   const g = {
@@ -508,7 +504,6 @@ function toGarageRevenueStrict(s) {
     pricing_tiers: toGaragePricingTiers(s)
   };
 
-  // Standardize the obvious one‑time bucket label/description to your preferred phrasing.
   polishOneTimeNameAndDescription(s, g);
   return g;
 }
@@ -517,8 +512,8 @@ function toGarageAllStrict(schedules) {
 }
 
 /* ----------------------------------------------------------------------------
-   /api/extract  (POST)
-   - UI keeps using this (full object). Add ?format=garage-only for array-only.
+   /api/extract (POST)
+   Add ?format=garage-only to return { revenue_schedule: [...] } directly.
 ---------------------------------------------------------------------------- */
 app.post('/api/extract', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -570,9 +565,9 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
     const garage = toGarageAllStrict(norm1);
 
+    // Wrapped array for downstream (your expected shape)
     if (String(format).toLowerCase() === 'garage-only') {
-      // Return ONLY the array—exactly like "Copy Garage JSON (All)"
-      return res.json(garage);
+      return res.json({ revenue_schedule: garage });
     }
 
     // Full object (for UI/debug) + final array included too
@@ -595,8 +590,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
 /* ----------------------------------------------------------------------------
    /api/use-contract-assistant (GET) — your friend's endpoint.
-   By default returns ONLY the Garage array (no wrapper).
-   Add ?format=full to get the verbose object for debugging.
+   Default = wrapped array; add &format=full for verbose debug.
 ---------------------------------------------------------------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
   const { contractID, model = 'o3', forceMulti = 'auto', format } = req.query;
@@ -639,10 +633,10 @@ app.get('/api/use-contract-assistant', async (req, res) => {
     const normalized = normalizeSchedules(data);
     const garage = toGarageAllStrict(normalized);
 
-    // Default: return ONLY the final array (what your “Copy All” produces)
+    // Default: downstream wrapper
     if (String(format || '').toLowerCase() !== 'full') {
       fs.unlink(tempPath, () => {});
-      return res.json(garage);
+      return res.json({ revenue_schedule: garage });
     }
 
     // Optional: full payload for debugging
