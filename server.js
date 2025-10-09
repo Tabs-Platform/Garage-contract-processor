@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import 'dotenv/config';
+import fetch from 'node-fetch';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -483,6 +484,70 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
     fs.unlink(req.file.path, () => {});
   }
 });
+
+// -------------- Contract Assistant Endpoint --------------
+app.get('/api/use-contract-assistant', async (req, res) => {
+  const { contractID, model = 'o3', forceMulti = 'auto' } = req.query;
+  if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
+
+  try {
+    // 1️⃣ Fetch the PDF from Tabs API
+    const pdfResp = await fetch(`https://integrators.prod.api.tabsplatform.com/v3/contracts/${contractID}/file`, {
+      headers: {
+        'accept': 'application/pdf',
+        'Authorization': `${process.env.LUXURY_PRESENCE_TABS_SANDBOX_API_KEY}`
+      }
+    });
+
+    if (!pdfResp.ok) {
+      throw new Error(`Failed to fetch PDF for contract ${contractID}: ${pdfResp.status}`);
+    }
+
+    // 2️⃣ Write PDF to temp file
+    const tempPath = `/tmp/${contractID}.pdf`;
+    const buf = Buffer.from(await pdfResp.arrayBuffer());
+    await fs.promises.writeFile(tempPath, buf);
+
+    // 3️⃣ Reuse existing /api/extract logic by simulating a file upload
+    const uploaded = await client.files.create({
+      file: await toFile(fs.createReadStream(tempPath), `${contractID}.pdf`),
+      purpose: 'assistants'
+    });
+
+    // 4️⃣ Call the same OpenAI extraction flow used in /api/extract
+    const response = await client.responses.create({
+      model,
+      input: [
+        { role: 'system', content: buildSystemPrompt(forceMulti) },
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
+            { type: 'input_file', file_id: uploaded.id }
+          ]
+        }
+      ],
+      text: { format: { type: 'json_object' } }
+    });
+
+    const data = parseModelJson(response);
+    const normalized = normalizeSchedules(data);
+
+    res.json({
+      model_used: model,
+      schedules: normalized,
+      model_recommendations: data.model_recommendations ?? null,
+      issues: Array.isArray(data.issues) ? data.issues : [],
+      totals_check: data.totals_check ?? null
+    });
+
+    fs.unlink(tempPath, () => {});
+  } catch (err) {
+    console.error('use-contract-assistant error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // local dev; on Vercel we export the handler
 if (process.env.NODE_ENV !== 'production') {
