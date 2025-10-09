@@ -485,6 +485,74 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
   }
 });
 
+// -------------- Garage JSON Formatters --------------
+function toGarageBillingType(bt) {
+  const map = { 'Flat price': 'FLAT_PRICE', 'Unit price': 'UNIT_PRICE', 'Tier flat price': 'TIER_FLAT_PRICE', 'Tier unit price': 'TIER_UNIT_PRICE' };
+  return map[bt] || 'FLAT_PRICE';
+}
+
+function toGarageFrequency(s) {
+  const unit = s.frequency_unit || 'None';
+  const unitMap = { 'None': 'NONE', 'Day(s)': 'DAY', 'Week(s)': 'WEEK', 'Semi_month(s)': 'SEMI_MONTH', 'Month(s)': 'MONTH', 'Year(s)': 'YEAR' };
+  return { frequency_unit: unitMap[unit] || 'NONE', period: s.frequency_every || 1, number_of_periods: s.periods || 0 };
+}
+
+function deriveMonthsOfService(s) {
+  if (s.months_of_service) return s.months_of_service;
+  if (!s.start_date || !s.calculated_end_date) return 0;
+  const start = new Date(s.start_date);
+  const end = new Date(s.calculated_end_date);
+  return Math.max(0, Math.round((end - start) / (1000 * 60 * 60 * 24 * 30.44)));
+}
+
+function mapIntegrationItem(name) {
+  const n = (name || '').toLowerCase();
+  if (/migration|startup|setup|onboard/i.test(n)) return 'migration_setup';
+  if (/contact.center|carebox/i.test(n)) return 'contact_center';
+  if (/investigator|registration|trial/i.test(n)) return 'investigator_registration';
+  if (/patient.data|recontact/i.test(n)) return 'patient_data_rights';
+  return null;
+}
+
+function toGaragePricingTiers(s) {
+  if (!Array.isArray(s.tiers) || !s.tiers.length) return [];
+  return s.tiers.map(t => ({
+    tier_name: t.tier_name || null,
+    price: Number.isFinite(Number(t.price)) ? Number(t.price) : 0,
+    applied_when: t.applied_when || null,
+    min_quantity: Number.isFinite(Number(t.min_quantity)) ? Number(t.min_quantity) : null
+  }));
+}
+
+function toGarageRevenue(s) {
+  const { frequency_unit, period, number_of_periods } = toGarageFrequency(s);
+  const service_term = deriveMonthsOfService(s) || 0;
+  const billing_type = toGarageBillingType(s?.billing_type);
+  const qty = billing_type === 'FLAT_PRICE' ? 1 : (Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : null);
+  const integration_item = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
+
+  return {
+    service_start_date: s.start_date || '',
+    service_term,
+    revenue_category: null,
+    item_name: s.item_name || '',
+    item_description: s.description || null,
+    start_date: s.start_date || '',
+    frequency_unit,
+    period,
+    number_of_periods,
+    arrears: false,
+    billing_type,
+    event_to_track: s.event_to_track ?? null,
+    integration_item,
+    discounts: [],
+    net_terms: Number.isFinite(Number(s?.net_terms)) ? Number(s.net_terms) : 0,
+    quantity: qty ?? 1,
+    total_price: Number.isFinite(Number(s?.total_price)) ? Number(s.total_price) : 0,
+    pricing_tiers: toGaragePricingTiers(s)
+  };
+}
+
 // -------------- Contract Assistant Endpoint --------------
 app.get('/api/use-contract-assistant', async (req, res) => {
   const { contractID, model = 'o3', forceMulti = 'auto' } = req.query;
@@ -534,14 +602,19 @@ app.get('/api/use-contract-assistant', async (req, res) => {
     const data = parseModelJson(response);
     const normalized = normalizeSchedules(data);
     console.log('Normalized data', normalized);
+    
+    // 5️⃣ Convert to Garage JSON format (same as "Copy Garage JSON (All)" button)
+    const garageFormatted = normalized.map(toGarageRevenue);
+    
     res.json({
+      garage_revenue_schedules: garageFormatted,  // This is the Garage-formatted output
+      raw_schedules: normalized,  // Keep original if needed
       model_used: model,
-      schedules: normalized,
       model_recommendations: data.model_recommendations ?? null,
       issues: Array.isArray(data.issues) ? data.issues : [],
       totals_check: data.totals_check ?? null
     });
-    console.log('Response sent to client', res.json);
+    console.log('Response sent to client - Garage formatted schedules');
     fs.unlink(tempPath, () => {});
   } catch (err) {
     console.error('use-contract-assistant error:', err);
