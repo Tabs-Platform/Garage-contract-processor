@@ -126,7 +126,7 @@ function canonicalizeName(s) {
   t = t.replace(/&/g, 'and');
   t = t.replace(/[^a-z0-9]/g, ' ');
   t = t.replace(/\s+/g, ' ').trim();
-  t = t.replace(/(\d)\s+(?=\d)/g, '$1'); // remove spaces between digits
+  t = t.replace(/(\d)\s+(?=\d)/g, '$1'); // remove spaces between digits (1 000 -> 1000)
   return t;
 }
 const CANON_INDEX = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => ({
@@ -142,14 +142,13 @@ function mapIntegrationItem(itemName) {
 }
 
 /* ----------------------------------------------------------------------------
-   Normalization + anti-hallucination (you already had these)               :contentReference[oaicite:2]{index=2}
----------------------------------------------------------------------------- */
+   Normalization + anti-hallucination (base from your current server)      ──
+   (Luxury Presence rule, prefer Flat unless strong per‑unit evidence)        */
 function clampEnum(value, allowed, fallback) {
   if (!value || typeof value !== 'string') return fallback;
   const byLower = new Map(allowed.map(v => [v.toLowerCase(), v]));
   return byLower.get(value.toLowerCase()) || fallback;
 }
-// Detect “Luxury Presence”
 function isLuxuryPresenceHint(s) {
   const parts = []
     .concat(s?.item_name || [], s?.description || [])
@@ -157,7 +156,6 @@ function isLuxuryPresenceHint(s) {
   const hay = parts.join(' ').toLowerCase();
   return /luxury\s+presence/.test(hay);
 }
-// Require strong evidence before accepting Unit/Tier
 function hasStrongUnitEvidence(s) {
   const parts = []
     .concat(s?.item_name || [], s?.description || [], s?.unit_label || [])
@@ -170,7 +168,6 @@ function hasStrongUnitEvidence(s) {
   const tierCount = Array.isArray(s?.tiers) ? s.tiers.length : 0;
   return perPattern.test(hay) || usageWords.test(hay) || (hasPPU && hasUnitLabel) || tierCount > 0;
 }
-// Prefer Flat unless there’s strong proof (plus brand rule)
 function normalizeBillingType(bt, hint = {}) {
   if (isLuxuryPresenceHint(hint)) return 'Flat price';
   if (Array.isArray(hint?.tiers) && hint.tiers.length) return 'Tier unit price';
@@ -196,7 +193,10 @@ function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   if (unit === 'None') every = 1;
   return { every, unit };
 }
-function pickNumber(n, fallback = null) { const x = Number(n); return Number.isFinite(x) ? x : fallback; }
+function pickNumber(n, fallback = null) {
+  const x = Number(n);
+  return Number.isFinite(x) ? x : fallback;
+}
 function computeTotalValue(s) {
   const periods = s.frequency_unit === 'None' ? 1 : pickNumber(s.periods, 1);
   const price   = pickNumber(s.total_price, null);
@@ -207,7 +207,7 @@ function computeTotalValue(s) {
 }
 
 /* ----------------------------------------------------------------------------
-   System prompt (unchanged, includes brand + anti-hallucination rules)     :contentReference[oaicite:3]{index=3}
+   System prompt (kept as in your server; includes brand + anti-usage rules)
 ---------------------------------------------------------------------------- */
 function buildSystemPrompt(forceMulti = 'auto') {
   const multiHint =
@@ -233,36 +233,7 @@ BRAND POLICY & ANTI-HALLUCINATION RULES:
 OUTPUT:
 Return ONE JSON object only (no prose) with:
 {
-  "schedules": [
-    {
-      "schedule_label": "string|null",
-      "item_name": "string",
-      "description": "string|null",
-      "billing_type": "Flat price|Unit price|Tier flat price|Tier unit price",
-      "total_price": number|null,
-      "quantity": number|null,
-      "start_date": "YYYY-MM-DD|null",
-
-      "frequency_every": number|null,
-      "frequency_unit": "None|Day(s)|Week(s)|Semi_month(s)|Month(s)|Year(s)",
-
-      "months_of_service": number|null,
-      "periods": number|null,
-      "calculated_end_date": "YYYY-MM-DD|null",
-      "net_terms": number|null,
-      "rev_rec_category": "string|null",
-
-      "event_to_track": "string|null",
-      "unit_label": "string|null",
-      "price_per_unit": number|null,
-      "volume_based": boolean|null,
-      "tiers": [
-        { "tier_name":"string|null","price":number|null,"applied_when":"string|null","min_quantity":number|null }
-      ],
-
-      "evidence": [{ "page": number, "snippet": "string" }]
-    }
-  ],
+  "schedules": [ ... ],
   "issues": ["string", "..."],
   "totals_check": { "sum_of_items": number|null, "contract_total_if_any": number|null, "matches": boolean|null, "notes": "string|null" },
   "model_recommendations": { "force_multi": boolean|null, "reasons": ["string", "..."] }
@@ -278,7 +249,7 @@ Rules:
 }
 
 /* ----------------------------------------------------------------------------
-   Parsing & schedule normalization                                          :contentReference[oaicite:4]{index=4}
+   Parse & Normalize the model JSON into our internal "schedules" shape
 ---------------------------------------------------------------------------- */
 function parseModelJson(apiResponse) {
   const raw = apiResponse?.output_text ?? JSON.stringify(apiResponse || {});
@@ -288,10 +259,12 @@ function parseModelJson(apiResponse) {
     return (a >= 0 && b > a) ? JSON.parse(raw.slice(a, b + 1)) : { schedules: [], issues: ['Could not parse model JSON'] };
   }
 }
+
 function normalizeSchedules(data) {
   const schedules = Array.isArray(data?.schedules) ? data.schedules : [];
   return schedules.map((s) => {
     const issues = Array.isArray(s.issues) ? [...s.issues] : [];
+
     let bt = clampEnum(normalizeBillingType(s.billing_type, s), BILLING_TYPES, 'Flat price');
     const { every, unit } = normalizeFrequency(s.frequency, s.frequency_every, s.frequency_unit, 'None');
 
@@ -333,7 +306,7 @@ function normalizeSchedules(data) {
       issues
     };
 
-    // Brand/policy enforcement
+    // Policy enforcement
     if (isLuxuryPresenceHint(s)) {
       out.billing_type = 'Flat price';
       out.quantity = 1;
@@ -367,7 +340,7 @@ function normalizeSchedules(data) {
 }
 
 /* ----------------------------------------------------------------------------
-   Agreement & confidence (unchanged)                                        :contentReference[oaicite:5]{index=5}
+   AGREEMENT / CONFIDENCE (unchanged)
 ---------------------------------------------------------------------------- */
 function clamp01(x){ return Math.max(0, Math.min(1, Number(x)||0)); }
 function tokenize(s) { if (!s) return []; return String(s).toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(x => x && x.length > 1); }
@@ -431,13 +404,36 @@ function computeAgreement(first, second) {
 }
 
 /* ----------------------------------------------------------------------------
-   SERVER-SIDE Garage JSON builders (identical to front-end)                :contentReference[oaicite:6]{index=6}
+   SERVER-SIDE Garage JSON (strict) — mirrors UI, produces array-only
 ---------------------------------------------------------------------------- */
+function toGarageBillingType(bt) {
+  const map = { 'Flat price': 'FLAT_PRICE', 'Unit price': 'UNIT_PRICE', 'Tier flat price': 'TIER_FLAT_PRICE', 'Tier unit price': 'TIER_UNIT_PRICE' };
+  return map[bt] || 'FLAT_PRICE';
+}
+function inferNumberOfPeriods(s, unit, every, periods) {
+  const p = Number(periods);
+  if (Number.isFinite(p) && p > 0) return p;
+
+  const mos = Number(s?.months_of_service);
+  // try to infer from months_of_service
+  if (Number.isFinite(mos) && mos > 0) {
+    if (unit === 'Month(s)') return Math.max(1, Math.round(mos / (every || 1)));
+    if (unit === 'Year(s)')  return Math.max(1, Math.round(mos / (12 * (every || 1))));
+    if (unit === 'Week(s)')  return Math.max(1, Math.round((mos * 30) / (7 * (every || 1))));
+    if (unit === 'Day(s)')   return Math.max(1, Math.round((mos * 30) / (1 * (every || 1))));
+    if (unit === 'Semi_month(s)') return Math.max(1, Math.round((mos * 30) / (15 * (every || 1))));
+  }
+  // fallback: if recurring, at least 1; if one-time, 0
+  return (unit && unit !== 'None') ? 1 : 0;
+}
 function toGarageFrequency(s) {
   const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
-  const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
   const unit = s?.frequency_unit;
-  if (!unit || unit === 'None') return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
+  const periods = inferNumberOfPeriods(s, unit, every, s?.periods);
+
+  if (!unit || unit === 'None') {
+    return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
+  }
   if (unit === 'Month(s)') {
     if (every === 3) return { frequency_unit: 'QUARTER', period: 1, number_of_periods: periods };
     return { frequency_unit: 'MONTH', period: every, number_of_periods: periods };
@@ -447,10 +443,6 @@ function toGarageFrequency(s) {
   if (unit === 'Semi_month(s)')return { frequency_unit: 'SEMI_MONTH', period: every, number_of_periods: periods };
   if (unit === 'Week(s)')      return { frequency_unit: 'DAYS', period: every*7, number_of_periods: periods };
   return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
-}
-function toGarageBillingType(bt) {
-  const map = { 'Flat price': 'FLAT_PRICE', 'Unit price': 'UNIT_PRICE', 'Tier flat price': 'TIER_FLAT_PRICE', 'Tier unit price': 'TIER_UNIT_PRICE' };
-  return map[bt] || 'FLAT_PRICE';
 }
 function toGaragePricingTiers(s) {
   if (!Array.isArray(s?.tiers) || !s.tiers.length) return [];
@@ -463,15 +455,39 @@ function toGaragePricingTiers(s) {
     name: t?.tier_name || t?.applied_when || null
   }));
 }
-function toGarageRevenue(s) {
+// Optional polish: standardize the one‑time line name/description if it's obviously a one‑time bucket
+function polishOneTimeNameAndDescription(s, g) {
+  const text = [s?.schedule_label, s?.item_name, s?.description, s?.rev_rec_category].filter(Boolean).join(' ').toLowerCase();
+  const isOneTime = g.frequency_unit === 'NONE' || /one[-\s]?time|setup|implementation|professional services/.test(text);
+  if (isOneTime) {
+    g.item_name = 'Implementation & One-Time Services';
+    g.item_description = 'Total one-time fees listed on order form';
+  }
+}
+
+function deriveMonthsOfService(s) {
+  if (Number.isFinite(Number(s?.months_of_service))) return Number(s.months_of_service);
+  const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
+  const periods = inferNumberOfPeriods(s, s?.frequency_unit, every, s?.periods);
+  const unit = s?.frequency_unit;
+  if (!unit || unit === 'None') return 0;
+  if (unit === 'Month(s)') return every * periods;
+  if (unit === 'Year(s)')  return 12 * every * periods;
+  if (unit === 'Week(s)')  return Math.round((7 * every * periods) / 30);
+  if (unit === 'Day(s)')   return Math.round((every * periods) / 30);
+  if (unit === 'Semi_month(s)') return Math.round((15 * every * periods) / 30);
+  return 0;
+}
+
+function toGarageRevenueStrict(s) {
   const { frequency_unit, period, number_of_periods } = toGarageFrequency(s);
   const service_term = deriveMonthsOfService(s) || 0;
   const billing_type = toGarageBillingType(s?.billing_type);
   const qty = billing_type === 'FLAT_PRICE' ? 1 : (Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : null);
-  // ALWAYS override with mapping when available
+
   const integration_item = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
 
-  return {
+  const g = {
     service_start_date: s.start_date || '',
     service_term,
     revenue_category: null,
@@ -491,29 +507,21 @@ function toGarageRevenue(s) {
     total_price: Number.isFinite(Number(s?.total_price)) ? Number(s.total_price) : 0,
     pricing_tiers: toGaragePricingTiers(s)
   };
+
+  // Standardize the obvious one‑time bucket label/description to your preferred phrasing.
+  polishOneTimeNameAndDescription(s, g);
+  return g;
 }
-function toGarageAll(schedules) { return (schedules || []).map(toGarageRevenue); }
-function deriveMonthsOfService(s) {
-  if (Number.isFinite(Number(s?.months_of_service))) return Number(s.months_of_service);
-  const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
-  const periods = Number.isFinite(Number(s?.periods)) ? Number(s.periods) : 1;
-  const unit = s?.frequency_unit;
-  if (!unit || unit === 'None') return 0;
-  if (unit === 'Month(s)') return every * periods;
-  if (unit === 'Year(s)')  return 12 * every * periods;
-  if (unit === 'Week(s)')  return Math.round((7 * every * periods) / 30);
-  if (unit === 'Day(s)')   return Math.round((every * periods) / 30);
-  if (unit === 'Semi_month(s)') return Math.round((15 * every * periods) / 30);
-  return 0;
+function toGarageAllStrict(schedules) {
+  return (schedules || []).map(toGarageRevenueStrict);
 }
 
 /* ----------------------------------------------------------------------------
-   /api/extract  (POST) — now also returns garage_revenue_schedules
+   /api/extract  (POST)
+   - UI keeps using this (full object). Add ?format=garage-only for array-only.
 ---------------------------------------------------------------------------- */
 app.post('/api/extract', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  console.log('Upload received:', { originalname: req.file.originalname, mimetype: req.file.mimetype, size: req.file.size });
-
   try {
     const { model = 'o3', forceMulti = 'auto', runs = '2', format } = req.query;
     const chosenModel = ['o3','o4-mini','gpt-4o-mini','o3-mini'].includes(model) ? model : 'o3';
@@ -560,52 +568,42 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
       agreement = agr.summary;
     }
 
-    // Final Garage JSON array (what your Copy All button produces)
-    const garage = toGarageAll(norm1);
+    const garage = toGarageAllStrict(norm1);
 
-    // Allow a garage-only response for easy downstream consumption
     if (String(format).toLowerCase() === 'garage-only') {
+      // Return ONLY the array—exactly like "Copy Garage JSON (All)"
       return res.json(garage);
     }
 
+    // Full object (for UI/debug) + final array included too
     res.json({
       model_used: chosenModel,
       runs: agreementRuns,
       schedules: norm1,
-      garage_revenue_schedules: garage, // <-- the final thing you want to send downstream
+      garage_revenue_schedules: garage,
       model_recommendations: data1.model_recommendations ?? null,
       issues: Array.isArray(data1.issues) ? data1.issues : [],
       totals_check: data1.totals_check ?? null,
       agreement_summary: agreement ?? null
     });
   } catch (err) {
-    const debug = {
-      message: err?.message,
-      status: err?.status,
-      name: err?.name,
-      type: err?.type,
-      code: err?.code,
-      request_id: err?.headers?.['x-request-id'],
-      data: err?.error ?? err?.response?.data ?? err?.response_body ?? null
-    };
-    console.error('OpenAI error:', JSON.stringify(debug, null, 2));
-    res.status(500).json({ error: 'Extraction failed', debug });
+    res.status(500).json({ error: 'Extraction failed', debug: { message: err?.message } });
   } finally {
     fs.unlink(req.file.path, () => {});
   }
 });
 
 /* ----------------------------------------------------------------------------
-   /api/use-contract-assistant (GET) — your friend’s endpoint.
-   Now returns garage_revenue_schedules (and supports ?format=garage-only).
-   (We keep original behavior for compatibility.)                           :contentReference[oaicite:7]{index=7}
+   /api/use-contract-assistant (GET) — your friend's endpoint.
+   By default returns ONLY the Garage array (no wrapper).
+   Add ?format=full to get the verbose object for debugging.
 ---------------------------------------------------------------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
-  const { contractID, model = 'o3', forceMulti = 'auto', format = 'garage' } = req.query;
+  const { contractID, model = 'o3', forceMulti = 'auto', format } = req.query;
   if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
 
   try {
-    // 1) Fetch PDF from Tabs API
+    // 1) Fetch the PDF from Tabs API
     const pdfResp = await fetch(`https://integrators.prod.api.tabsplatform.com/v3/contracts/${contractID}/file`, {
       headers: {
         'accept': 'application/pdf',
@@ -614,18 +612,17 @@ app.get('/api/use-contract-assistant', async (req, res) => {
     });
     if (!pdfResp.ok) throw new Error(`Failed to fetch PDF for contract ${contractID}: ${pdfResp.status}`);
 
-    // 2) Temp file
+    // 2) Save temporarily
     const tempPath = `/tmp/${contractID}.pdf`;
     const buf = Buffer.from(await pdfResp.arrayBuffer());
     await fs.promises.writeFile(tempPath, buf);
 
-    // 3) Upload to OpenAI
+    // 3) Upload & extract
     const uploaded = await client.files.create({
       file: await toFile(fs.createReadStream(tempPath), `${contractID}.pdf`),
       purpose: 'assistants'
     });
 
-    // 4) Extract (same as /api/extract Run #1)
     const response = await client.responses.create({
       model,
       input: [
@@ -640,19 +637,19 @@ app.get('/api/use-contract-assistant', async (req, res) => {
 
     const data = parseModelJson(response);
     const normalized = normalizeSchedules(data);
-    const garage = toGarageAll(normalized);
+    const garage = toGarageAllStrict(normalized);
 
-    // If your friend wants only the final array:
-    if (String(format).toLowerCase() === 'garage-only') {
+    // Default: return ONLY the final array (what your “Copy All” produces)
+    if (String(format || '').toLowerCase() !== 'full') {
       fs.unlink(tempPath, () => {});
       return res.json(garage);
     }
 
-    // Otherwise return both (final Garage JSON + normalized schedules for debug)
+    // Optional: full payload for debugging
     res.json({
       model_used: model,
       schedules: normalized,
-      garage_revenue_schedules: garage, // <— the final “Copy All” JSON
+      garage_revenue_schedules: garage,
       model_recommendations: data.model_recommendations ?? null,
       issues: Array.isArray(data.issues) ? data.issues : [],
       totals_check: data.totals_check ?? null
@@ -666,7 +663,7 @@ app.get('/api/use-contract-assistant', async (req, res) => {
 });
 
 /* ----------------------------------------------------------------------------
-   Health & server bootstrap
+   Health
 ---------------------------------------------------------------------------- */
 app.get('/health', async (_req, res) => {
   try {
