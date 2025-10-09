@@ -498,7 +498,8 @@ app.get('/api/use-contract-assistant', async (req, res) => {
         'Authorization': `${process.env.LUXURY_PRESENCE_TABS_SANDBOX_API_KEY}`
       }
     });
-
+    print('Hitting tabs api with contractID ', contractID);
+    print('pdfResp', pdfResp);
     if (!pdfResp.ok) {
       throw new Error(`Failed to fetch PDF for contract ${contractID}: ${pdfResp.status}`);
     }
@@ -507,13 +508,13 @@ app.get('/api/use-contract-assistant', async (req, res) => {
     const tempPath = `/tmp/${contractID}.pdf`;
     const buf = Buffer.from(await pdfResp.arrayBuffer());
     await fs.promises.writeFile(tempPath, buf);
-
+    print('Wrote pdf to temp file');
     // 3️⃣ Reuse existing /api/extract logic by simulating a file upload
     const uploaded = await client.files.create({
       file: await toFile(fs.createReadStream(tempPath), `${contractID}.pdf`),
       purpose: 'assistants'
     });
-
+    print('Created file id', uploaded.id);
     // 4️⃣ Call the same OpenAI extraction flow used in /api/extract
     const response = await client.responses.create({
       model,
@@ -529,10 +530,10 @@ app.get('/api/use-contract-assistant', async (req, res) => {
       ],
       text: { format: { type: 'json_object' } }
     });
-
+    print('Response from OpenAI', response);
     const data = parseModelJson(response);
     const normalized = normalizeSchedules(data);
-
+    print('Normalized data', normalized);
     res.json({
       model_used: model,
       schedules: normalized,
@@ -540,7 +541,7 @@ app.get('/api/use-contract-assistant', async (req, res) => {
       issues: Array.isArray(data.issues) ? data.issues : [],
       totals_check: data.totals_check ?? null
     });
-
+    print('Response sent to client', res.json);
     fs.unlink(tempPath, () => {});
   } catch (err) {
     console.error('use-contract-assistant error:', err);
