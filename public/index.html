@@ -97,7 +97,7 @@
 
       // ---------------- ITEM_NAME → INTEGRATION_ITEM map (client-side only) ----------------
       // Right column (Item Name) → Left column (Integration Id)
-      // Exact, case-insensitive match. You can add/fix rows here any time without redeploying server code.
+      // Exact, case-insensitive match + canonical equality for robustness.
       const INTEGRATION_BY_ITEM = new Map([
         ['Ad Spend ($500)', 'Ad Spend'],
         ['Ad Spend ($1,000)', 'Ad Spend'],
@@ -187,37 +187,42 @@
       ].map(([itemName, integrationId]) => [itemName.toLowerCase().trim(), integrationId])
       );
 
-      // For light fuzzy matching (e.g., stray spaces, punctuation variants)
+      // Robust canonical form for fuzzy-ish matching:
+      // - lower-case
+      // - '&' -> 'and'
+      // - drop all non [a-z0-9] to space
+      // - collapse whitespace
+      // - collapse spaces between digits (so 1,000 ≈ 1000)
       function canonicalizeName(s) {
-        return String(s || '')
-          .toLowerCase()
-          .replace(/&/g, 'and')
-          .replace(/[^a-z0-9\s+]/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim();
+        let t = String(s || '').toLowerCase();
+        t = t.replace(/&/g, 'and');
+        t = t.replace(/[^a-z0-9]/g, ' ');
+        t = t.replace(/\s+/g, ' ').trim();
+        t = t.replace(/(\d)\s+(?=\d)/g, '$1'); // remove spaces between digits
+        return t;
       }
+
+      // Build an index once for canonical matching
+      const CANON_INDEX = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => ({
+        rawKey: k, canonKey: canonicalizeName(k), val: v
+      }));
+
       function mapIntegrationItem(itemName) {
         if (!itemName) return null;
-        const exact = INTEGRATION_BY_ITEM.get(itemName.toLowerCase().trim());
+        // 1) exact case-insensitive
+        const exact = INTEGRATION_BY_ITEM.get(String(itemName).toLowerCase().trim());
         if (exact) return exact;
-
-        // fuzzy-ish: try canonical form
+        // 2) canonical equality
         const canon = canonicalizeName(itemName);
-        // build a small lookup index the first time
-        if (!mapIntegrationItem._idx) {
-          mapIntegrationItem._idx = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => ({
-            rawKey: k, canonKey: canonicalizeName(k), val: v
-          }));
-        }
-        const hit = mapIntegrationItem._idx.find(e => e.canonKey === canon);
+        const hit = CANON_INDEX.find(e => e.canonKey === canon);
         return hit ? hit.val : null;
       }
+
+      // ALWAYS prefer the table mapping when available (override whatever the LLM sent)
       function applyIntegrationMap(schedules) {
         (schedules || []).forEach(s => {
-          const already = s?.integration_item;
-          if (already && String(already).trim()) return; // don't overwrite if model already set it
           const mapped = mapIntegrationItem(s?.item_name);
-          if (mapped) s.integration_item = mapped;
+          if (mapped) s.integration_item = mapped; // override regardless of current value
         });
       }
 
@@ -246,7 +251,7 @@
           const payload = ct.includes('application/json') ? await res.json() : { error: await res.text() };
           if (!res.ok) throw new Error(payload?.debug?.message || payload?.error || 'Request failed');
 
-          // >>> APPLY CLIENT-SIDE INTEGRATION MAPPING <<<
+          // >>> ALWAYS APPLY CLIENT-SIDE INTEGRATION MAPPING <<<
           applyIntegrationMap(payload.schedules);
 
           const flagged = (payload.schedules||[]).filter(s => s.flag_for_review).length;
@@ -347,7 +352,7 @@
             `;
             results.appendChild(card);
 
-            // Wire the per-item copy button (includes client-side integration_item)
+            // Per-item copy (includes mapped integration_item)
             card.querySelector('button.btn.secondary').onclick = () => {
               const one = toGarageRevenue({ ...s, calculated_end_date: endDate });
               navigator.clipboard.writeText(JSON.stringify(one, null, 2)).then(()=>alert(`Copied Garage JSON for item ${i+1}`));
@@ -519,10 +524,8 @@
         const billing_type = toGarageBillingType(s?.billing_type);
         const qty = billing_type === 'FLAT_PRICE' ? 1 : (Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : null);
 
-        // ensure integration_item is applied client-side too (belt & suspenders)
-        const integration_item = (s?.integration_item && String(s.integration_item).trim())
-          ? s.integration_item
-          : mapIntegrationItem(s?.item_name);
+        // ALWAYS prefer the mapping over whatever the model sent
+        const integration_item = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
 
         return {
           service_start_date: s.start_date || '',
@@ -537,7 +540,7 @@
           arrears: false,
           billing_type,
           event_to_track: s.event_to_track ?? null,
-          integration_item: integration_item ?? null,
+          integration_item,
           discounts: [],
           net_terms: Number.isFinite(Number(s?.net_terms)) ? Number(s.net_terms) : 0,
           quantity: qty ?? 1,
