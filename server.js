@@ -247,6 +247,31 @@ function parseModelJson(apiResponse) {
   }
 }
 
+/* ------------------- Date helpers for month math ------------------- */
+function monthsFromDates(startStr, endStr) {
+  if (!startStr || !endStr) return null;
+  const start = new Date(startStr);
+  const end = new Date(endStr);
+  if (isNaN(start) || isNaN(end)) return null;
+  const ms = end - start;
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  return Math.max(1, Math.round(ms / (1000 * 60 * 60 * 24 * 30))); // ~30-day months
+}
+
+/* ------------------- Period logic (driven by months) ------------------- */
+function periodsFromMonths(unit, every, months) {
+  if (!unit || unit === 'None') return 0;
+  const m = Number(months);
+  const e = Number(every) || 1;
+  if (!Number.isFinite(m) || m <= 0) return 1;
+  if (unit === 'Month(s)')      return Math.max(1, Math.round(m / e));
+  if (unit === 'Year(s)')       return Math.max(1, Math.round(m / (12 * e)));
+  if (unit === 'Week(s)')       return Math.max(1, Math.round((m * 30) / (7 * e)));
+  if (unit === 'Day(s)')        return Math.max(1, Math.round((m * 30) / (1 * e)));
+  if (unit === 'Semi_month(s)') return Math.max(1, Math.round((m * 30) / (15 * e)));
+  return 1;
+}
+
 /* ------------------- Price fallbacks ------------------- */
 function extractPriceFromEvidenceLikeText(texts) {
   const out = [];
@@ -262,16 +287,38 @@ function extractPriceFromEvidenceLikeText(texts) {
   if (!out.length) return null;
   return out[out.length - 1];
 }
+
+// FIXED: no more inferNumberOfPeriods — compute from months instead
 function fallbackTotalPrice(s) {
   const unit = s?.frequency_unit;
   const recurring = unit && unit !== 'None';
   const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
-  const periods = inferNumberOfPeriods(s, unit, every, s?.periods);
+
+  // derive months (dates → explicit months → existing periods math)
+  const months =
+    monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date)
+    ?? (Number.isFinite(Number(s?.months_of_service)) ? Number(s.months_of_service) : null)
+    ?? (() => {
+         const p = Number(s?.periods);
+         if (!Number.isFinite(p) || p <= 0) return null;
+         if (unit === 'Month(s)')      return every * p;
+         if (unit === 'Year(s)')       return 12 * every * p;
+         if (unit === 'Week(s)')       return Math.round((7 * every * p) / 30);
+         if (unit === 'Day(s)')        return Math.round((every * p) / 30);
+         if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
+         return null;
+       })();
+
+  const periods = periodsFromMonths(unit, every, months);
+
+  // 1) If the model provided a total_value (whole term), back into per-period price
   if (Number.isFinite(Number(s?.total_value))) {
     const tv = Number(s.total_value);
     if (recurring && periods > 0) return +(tv / periods).toFixed(2);
     return tv;
   }
+
+  // 2) Parse a price from evidence/description/name
   const texts = [];
   if (Array.isArray(s?.evidence)) for (const ev of s.evidence) if (ev?.snippet) texts.push(ev.snippet);
   if (s?.description) texts.push(String(s.description));
@@ -355,7 +402,7 @@ function normalizeSchedules(data) {
       }
     }
 
-    // Price fallback
+    // Price fallback (now uses periodsFromMonths via fallbackTotalPrice)
     if (out.total_price == null) {
       const p = fallbackTotalPrice({ ...s, ...out });
       if (Number.isFinite(p)) out.total_price = p;
@@ -428,31 +475,6 @@ function computeAgreement(first, second) {
   return { enriched, summary: { avg_confidence: avg, min_confidence: min, total_items_run1: first.length, total_items_run2: second.length, unmatched_in_run2: Math.max(0, first.length - used.size) } };
 }
 
-/* ------------------- Date helpers for month math ------------------- */
-function monthsFromDates(startStr, endStr) {
-  if (!startStr || !endStr) return null;
-  const start = new Date(startStr);
-  const end = new Date(endStr);
-  if (isNaN(start) || isNaN(end)) return null;
-  const ms = end - start;
-  if (!Number.isFinite(ms) || ms <= 0) return null;
-  return Math.max(1, Math.round(ms / (1000 * 60 * 60 * 24 * 30))); // ~30-day months
-}
-
-/* ------------------- Period logic (now driven by months) ------------------- */
-function periodsFromMonths(unit, every, months) {
-  if (!unit || unit === 'None') return 0;
-  const m = Number(months);
-  const e = Number(every) || 1;
-  if (!Number.isFinite(m) || m <= 0) return 1;
-  if (unit === 'Month(s)')      return Math.max(1, Math.round(m / e));
-  if (unit === 'Year(s)')       return Math.max(1, Math.round(m / (12 * e)));
-  if (unit === 'Week(s)')       return Math.max(1, Math.round((m * 30) / (7 * e)));
-  if (unit === 'Day(s)')        return Math.max(1, Math.round((m * 30) / (1 * e)));
-  if (unit === 'Semi_month(s)') return Math.max(1, Math.round((m * 30) / (15 * e)));
-  return 1;
-}
-
 /* ------------------- Garage JSON builders ------------------- */
 function toGarageBillingType(bt) {
   const map = { 'Flat price': 'FLAT_PRICE', 'Unit price': 'UNIT_PRICE', 'Tier flat price': 'TIER_FLAT_PRICE', 'Tier unit price': 'TIER_UNIT_PRICE' };
@@ -503,7 +525,7 @@ function deriveMonthsOfService(s) {
     if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
   }
   if (!unit || unit === 'None') return 0;
-  return 0; // unknown → 0 (we'll still set periods via default rules)
+  return 0;
 }
 function toGarageRevenueStrict(s) {
   // 1) derive months first
