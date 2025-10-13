@@ -327,7 +327,7 @@ function normalizeSchedules(data) {
 
       months_of_service: pickNumber(s.months_of_service, null),
       periods: pickNumber(s.periods, 1),
-      calculated_end_date: s.calculated_end_date || null,
+      calculated_end_date: s.calculated_end_date || s.end_date || null, // accept either
       net_terms: pickNumber(s.net_terms, 0),
       rev_rec_category: s.rev_rec_category ?? null,
 
@@ -452,6 +452,21 @@ function computeAgreement(first, second) {
 }
 
 /* ----------------------------------------------------------------------------
+   Date helpers for month computations (service_term / periods)
+---------------------------------------------------------------------------- */
+function monthsFromDates(startStr, endStr) {
+  if (!startStr || !endStr) return null;
+  const start = new Date(startStr);
+  const end = new Date(endStr);
+  if (isNaN(start) || isNaN(end)) return null;
+  const ms = end - start;
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  // Approximate months via 30-day months; round to nearest
+  const months = Math.round(ms / (1000 * 60 * 60 * 24 * 30));
+  return Math.max(1, months);
+}
+
+/* ----------------------------------------------------------------------------
    SERVER-SIDE Garage JSON (strict) — produces the final objects your friend needs
 ---------------------------------------------------------------------------- */
 function toGarageBillingType(bt) {
@@ -461,6 +476,16 @@ function toGarageBillingType(bt) {
 function inferNumberOfPeriods(s, unit, every, periods) {
   const p = Number(periods);
   if (Number.isFinite(p) && p > 0) return p;
+
+  // NEW: if start/end exist, derive periods from that month span
+  const mosFromDates = monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date);
+  if (Number.isFinite(mosFromDates) && mosFromDates > 0) {
+    if (unit === 'Month(s)')      return Math.max(1, Math.round(mosFromDates / (every || 1)));
+    if (unit === 'Year(s)')       return Math.max(1, Math.round(mosFromDates / (12 * (every || 1))));
+    if (unit === 'Week(s)')       return Math.max(1, Math.round((mosFromDates * 30) / (7 * (every || 1))));
+    if (unit === 'Day(s)')        return Math.max(1, Math.round((mosFromDates * 30) / (1 * (every || 1))));
+    if (unit === 'Semi_month(s)') return Math.max(1, Math.round((mosFromDates * 30) / (15 * (every || 1))));
+  }
 
   const mos = Number(s?.months_of_service);
   if (Number.isFinite(mos) && mos > 0) {
@@ -475,11 +500,13 @@ function inferNumberOfPeriods(s, unit, every, periods) {
 function toGarageFrequency(s) {
   const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
   const unit = s?.frequency_unit;
+
+  // Derive periods with all sources (periods field, months_of_service, or dates)
   const periods = inferNumberOfPeriods(s, unit, every, s?.periods);
 
   if (!unit || unit === 'None') {
     return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
-  }
+    }
   if (unit === 'Month(s)') {
     if (every === 3) return { frequency_unit: 'QUARTER', period: 1, number_of_periods: periods };
     return { frequency_unit: 'MONTH', period: every, number_of_periods: periods };
@@ -501,17 +528,33 @@ function toGaragePricingTiers(s) {
     name: t?.tier_name || t?.applied_when || null
   }));
 }
-// Standardize obvious one-time bucket label/description
+
+// Prefer clean standardized one-time label,
+// but only overwrite if the name is missing/blank to avoid hiding real names.
 function polishOneTimeNameAndDescription(s, g) {
   const text = [s?.schedule_label, s?.item_name, s?.description, s?.rev_rec_category].filter(Boolean).join(' ').toLowerCase();
   const isOneTime = g.frequency_unit === 'NONE' || /one[-\s]?time|setup|implementation|professional services/.test(text);
   if (isOneTime) {
-    g.item_name = 'Implementation & One-Time Services';
-    g.item_description = 'Total one-time fees listed on order form';
+    if (!g.item_name) g.item_name = 'Implementation & One-Time Services';
+    if (!g.item_description) g.item_description = 'Total one-time fees listed on order form';
   }
 }
-// FIXED: only accept explicit positive months_of_service; otherwise infer from cadence
+
+// NEW: never leave item_name blank — choose best available label
+function chooseItemName(rawName, integrationItem, scheduleLabel, frequencyUnit) {
+  const name = String(rawName || '').trim();
+  if (name) return name;
+  if (integrationItem) return integrationItem;
+  if (scheduleLabel) return String(scheduleLabel);
+  // default fallback
+  return (frequencyUnit && frequencyUnit !== 'NONE') ? 'Subscription' : 'Implementation & One-Time Services';
+}
+
+// Derive months_of_service with precedence: dates → explicit months → cadence math
 function deriveMonthsOfService(s) {
+  const byDates = monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date);
+  if (Number.isFinite(byDates) && byDates > 0) return byDates;
+
   const mosRaw = s?.months_of_service;
   if (mosRaw !== null && mosRaw !== undefined) {
     const mosNum = Number(mosRaw);
@@ -528,18 +571,21 @@ function deriveMonthsOfService(s) {
   if (unit === 'Semi_month(s)') return Math.round((15 * every * periods) / 30);
   return 0;
 }
+
 function toGarageRevenueStrict(s) {
   const { frequency_unit, period, number_of_periods } = toGarageFrequency(s);
   const service_term = deriveMonthsOfService(s) || 0;
   const billing_type = toGarageBillingType(s?.billing_type);
   const qty = billing_type === 'FLAT_PRICE' ? 1 : (Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : null);
-  const integration_item = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
+
+  const mappedIntegration = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
+  const finalItemName = chooseItemName(s?.item_name, mappedIntegration, s?.schedule_label, frequency_unit);
 
   const g = {
     service_start_date: s.start_date || '',
     service_term,
     revenue_category: null,
-    item_name: s.item_name || '',
+    item_name: finalItemName || '',
     item_description: s.description || null,
     start_date: s.start_date || '',
     frequency_unit,
@@ -548,7 +594,7 @@ function toGarageRevenueStrict(s) {
     arrears: false,
     billing_type,
     event_to_track: s.event_to_track ?? null,
-    integration_item,
+    integration_item: mappedIntegration,
     discounts: [],
     net_terms: Number.isFinite(Number(s?.net_terms)) ? Number(s.net_terms) : 0,
     quantity: qty ?? 1,
