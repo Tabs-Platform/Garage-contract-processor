@@ -12,7 +12,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-// /tmp is the only writable dir on Vercel; use it in prod
+// /tmp is the only writable dir on some hosts; use it in prod
 const uploadDir = process.env.NODE_ENV === 'production' ? '/tmp/uploads/' : 'uploads/';
 try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
 const upload = multer({ dest: uploadDir });
@@ -180,7 +180,8 @@ function normalizeBillingType(bt, hint = {}) {
   return 'Flat price';
 }
 function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
-  let every = Number.isInteger(rawEvery) ? rawEvery : 1;
+  // Accept numeric strings too (fix)
+  let every = Number.isFinite(Number(rawEvery)) ? Number(rawEvery) : 1;
   let unit  = clampEnum(rawUnit, FREQ_UNITS, null);
   const txt = (rawText || '').toLowerCase();
   if (!unit) {
@@ -262,6 +263,45 @@ function parseModelJson(apiResponse) {
   }
 }
 
+/* --------- price fallbacks: derive per-item price from model/evidence ------- */
+function extractPriceFromEvidenceLikeText(texts) {
+  const out = [];
+  const currencyRe = /\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/g;
+  for (const t of texts) {
+    if (!t) continue;
+    let m;
+    while ((m = currencyRe.exec(String(t)))) {
+      const n = Number(String(m[1]).replace(/,/g, ''));
+      if (Number.isFinite(n) && n > 0) out.push(n);
+    }
+  }
+  if (!out.length) return null;
+  // Heuristic: the last $amount on the line is usually the per-period price
+  return out[out.length - 1];
+}
+function fallbackTotalPrice(s) {
+  // 1) If model gave a total_value, convert to a per-period price when recurring
+  const unit = s?.frequency_unit;
+  const recurring = unit && unit !== 'None';
+  const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
+  const periods = inferNumberOfPeriods(s, unit, every, s?.periods);
+  if (Number.isFinite(Number(s?.total_value))) {
+    const tv = Number(s.total_value);
+    if (recurring && periods > 0) return +(tv / periods).toFixed(2);
+    return tv;
+  }
+
+  // 2) Parse from evidence / description / item_name
+  const texts = [];
+  if (Array.isArray(s?.evidence)) for (const ev of s.evidence) if (ev?.snippet) texts.push(ev.snippet);
+  if (s?.description) texts.push(String(s.description));
+  if (s?.item_name)   texts.push(String(s.item_name));
+
+  const p = extractPriceFromEvidenceLikeText(texts);
+  return Number.isFinite(p) ? p : null;
+}
+
+/* ------------------------------ normalize schedules ------------------------ */
 function normalizeSchedules(data) {
   const schedules = Array.isArray(data?.schedules) ? data.schedules : [];
   return schedules.map((s) => {
@@ -336,6 +376,12 @@ function normalizeSchedules(data) {
       }
     }
 
+    // Fallback: if total_price is missing, derive it (from total_value or $amounts in evidence)
+    if (out.total_price == null) {
+      const p = fallbackTotalPrice({ ...s, ...out }); // use both raw & normalized fields
+      if (Number.isFinite(p)) out.total_price = p;
+    }
+
     out.total_value = computeTotalValue(out);
     return out;
   });
@@ -406,7 +452,7 @@ function computeAgreement(first, second) {
 }
 
 /* ----------------------------------------------------------------------------
-   SERVER-SIDE Garage JSON (strict) — produces the final objects the endpoint needs
+   SERVER-SIDE Garage JSON (strict) — produces the final objects your friend needs
 ---------------------------------------------------------------------------- */
 function toGarageBillingType(bt) {
   const map = { 'Flat price': 'FLAT_PRICE', 'Unit price': 'UNIT_PRICE', 'Tier flat price': 'TIER_FLAT_PRICE', 'Tier unit price': 'TIER_UNIT_PRICE' };
@@ -455,6 +501,7 @@ function toGaragePricingTiers(s) {
     name: t?.tier_name || t?.applied_when || null
   }));
 }
+// Standardize obvious one-time bucket label/description
 function polishOneTimeNameAndDescription(s, g) {
   const text = [s?.schedule_label, s?.item_name, s?.description, s?.rev_rec_category].filter(Boolean).join(' ').toLowerCase();
   const isOneTime = g.frequency_unit === 'NONE' || /one[-\s]?time|setup|implementation|professional services/.test(text);
@@ -463,16 +510,21 @@ function polishOneTimeNameAndDescription(s, g) {
     g.item_description = 'Total one-time fees listed on order form';
   }
 }
+// FIXED: only accept explicit positive months_of_service; otherwise infer from cadence
 function deriveMonthsOfService(s) {
-  if (Number.isFinite(Number(s?.months_of_service))) return Number(s.months_of_service);
+  const mosRaw = s?.months_of_service;
+  if (mosRaw !== null && mosRaw !== undefined) {
+    const mosNum = Number(mosRaw);
+    if (Number.isFinite(mosNum) && mosNum > 0) return mosNum;
+  }
   const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
   const periods = inferNumberOfPeriods(s, s?.frequency_unit, every, s?.periods);
   const unit = s?.frequency_unit;
   if (!unit || unit === 'None') return 0;
-  if (unit === 'Month(s)') return every * periods;
-  if (unit === 'Year(s)')  return 12 * every * periods;
-  if (unit === 'Week(s)')  return Math.round((7 * every * periods) / 30);
-  if (unit === 'Day(s)')   return Math.round((every * periods) / 30);
+  if (unit === 'Month(s)')      return every * periods;
+  if (unit === 'Year(s)')       return 12 * every * periods;
+  if (unit === 'Week(s)')       return Math.round((7 * every * periods) / 30);
+  if (unit === 'Day(s)')        return Math.round((every * periods) / 30);
   if (unit === 'Semi_month(s)') return Math.round((15 * every * periods) / 30);
   return 0;
 }
@@ -589,7 +641,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 });
 
 /* ----------------------------------------------------------------------------
-   /api/use-contract-assistant (GET) — The endpoint.
+   /api/use-contract-assistant (GET) — your friend's endpoint.
    Default = wrapped array; add &format=full for verbose debug.
 ---------------------------------------------------------------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
