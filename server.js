@@ -12,7 +12,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-// /tmp is the only writable dir on some hosts; use it in prod
 const uploadDir = process.env.NODE_ENV === 'production' ? '/tmp/uploads/' : 'uploads/';
 try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
 const upload = multer({ dest: uploadDir });
@@ -23,14 +22,10 @@ const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '5mb' }));
 
-// ---- Enums aligned with your Garage options for the extractor normalizer ----
 const BILLING_TYPES = ['Flat price','Unit price','Tier flat price','Tier unit price'];
 const FREQ_UNITS   = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year(s)'];
 
-/* ----------------------------------------------------------------------------
-   ITEM NAME  →  INTEGRATION ITEM  (server-side mapping)
-   Always prefer this mapping over any integration_item from the model.
----------------------------------------------------------------------------- */
+/* ----------------------- ITEM NAME → INTEGRATION ITEM ---------------------- */
 const INTEGRATION_PAIRS = [
   ['Ad Spend ($500)', 'Ad Spend'],
   ['Ad Spend ($1,000)', 'Ad Spend'],
@@ -125,15 +120,12 @@ function canonicalizeName(s) {
   let t = String(s || '').toLowerCase();
   t = t.replace(/&/g, 'and');
   t = t.replace(/[^a-z0-9]/g, ' ');
-  // treat “add-on / addon” as noise so “Agent Landing Pages (Add-On)” ≈ “Agent Landing Pages”
-  t = t.replace(/\b(add[-\s]?on|addon)s?\b/g, '');
+  t = t.replace(/\b(add[-\s]?on|addon)s?\b/g, ''); // ignore “Add-On”
   t = t.replace(/\s+/g, ' ').trim();
-  t = t.replace(/(\d)\s+(?=\d)/g, '$1'); // remove spaces between digits (1 000 -> 1000)
+  t = t.replace(/(\d)\s+(?=\d)/g, '$1');
   return t;
 }
-const CANON_INDEX = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => ({
-  rawKey: k, canonKey: canonicalizeName(k), val: v
-}));
+const CANON_INDEX = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => ({ rawKey: k, canonKey: canonicalizeName(k), val: v }));
 function mapIntegrationItem(itemName) {
   if (!itemName) return null;
   const exact = INTEGRATION_BY_ITEM.get(String(itemName).toLowerCase().trim());
@@ -143,9 +135,7 @@ function mapIntegrationItem(itemName) {
   return hit ? hit.val : null;
 }
 
-/* ----------------------------------------------------------------------------
-   Normalization + anti-hallucination (prefer Flat; Luxury Presence = Flat)
----------------------------------------------------------------------------- */
+/* ------------------- Normalization & guardrails ------------------- */
 function clampEnum(value, allowed, fallback) {
   if (!value || typeof value !== 'string') return fallback;
   const byLower = new Map(allowed.map(v => [v.toLowerCase(), v]));
@@ -180,7 +170,6 @@ function normalizeBillingType(bt, hint = {}) {
   return 'Flat price';
 }
 function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
-  // Accept numeric strings too (fix)
   let every = Number.isFinite(Number(rawEvery)) ? Number(rawEvery) : 1;
   let unit  = clampEnum(rawUnit, FREQ_UNITS, null);
   const txt = (rawText || '').toLowerCase();
@@ -209,9 +198,7 @@ function computeTotalValue(s) {
   return null;
 }
 
-/* ----------------------------------------------------------------------------
-   System prompt (brand rule + anti-usage bias)
----------------------------------------------------------------------------- */
+/* ------------------- Prompt ------------------- */
 function buildSystemPrompt(forceMulti = 'auto') {
   const multiHint =
     forceMulti === 'on'
@@ -230,7 +217,6 @@ ${multiHint}
 BRAND POLICY & ANTI-HALLUCINATION RULES:
 - "Luxury Presence" contracts are NEVER usage- or unit-priced. For ANY item tied to Luxury Presence, set billing_type="Flat price", quantity=1, and leave event_to_track, unit_label, price_per_unit and tiers NULL/empty. Do NOT infer them.
 - DEFAULT to "Flat price" when ambiguous. Only choose "Unit price" or "Tier*" when you can QUOTE explicit per-unit/usage language from the contract (e.g., "per user", "per seat", "per lead", "per impression", "overage", "usage", or an explicit rate card like "$X per Y").
-- If you cannot provide such evidence in the evidence[].snippet for that item, use "Flat price" instead and add an issue describing the ambiguity.
 - Never populate event_to_track unless the contract explicitly defines the tracked event; otherwise keep it null.
 
 OUTPUT:
@@ -251,9 +237,7 @@ Rules:
 - If uncertain about a field, set it to null and add an issue.`;
 }
 
-/* ----------------------------------------------------------------------------
-   Parse & Normalize the model JSON into our internal "schedules" shape
----------------------------------------------------------------------------- */
+/* ------------------- Parse model JSON ------------------- */
 function parseModelJson(apiResponse) {
   const raw = apiResponse?.output_text ?? JSON.stringify(apiResponse || {});
   try { return JSON.parse(raw); }
@@ -263,7 +247,7 @@ function parseModelJson(apiResponse) {
   }
 }
 
-/* --------- price fallbacks: derive per-item price from model/evidence ------- */
+/* ------------------- Price fallbacks ------------------- */
 function extractPriceFromEvidenceLikeText(texts) {
   const out = [];
   const currencyRe = /\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/g;
@@ -276,11 +260,9 @@ function extractPriceFromEvidenceLikeText(texts) {
     }
   }
   if (!out.length) return null;
-  // Heuristic: the last $amount on the line is usually the per-period price
   return out[out.length - 1];
 }
 function fallbackTotalPrice(s) {
-  // 1) If model gave a total_value, convert to a per-period price when recurring
   const unit = s?.frequency_unit;
   const recurring = unit && unit !== 'None';
   const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
@@ -290,18 +272,15 @@ function fallbackTotalPrice(s) {
     if (recurring && periods > 0) return +(tv / periods).toFixed(2);
     return tv;
   }
-
-  // 2) Parse from evidence / description / item_name
   const texts = [];
   if (Array.isArray(s?.evidence)) for (const ev of s.evidence) if (ev?.snippet) texts.push(ev.snippet);
   if (s?.description) texts.push(String(s.description));
   if (s?.item_name)   texts.push(String(s.item_name));
-
   const p = extractPriceFromEvidenceLikeText(texts);
   return Number.isFinite(p) ? p : null;
 }
 
-/* ------------------------------ normalize schedules ------------------------ */
+/* ------------------- Normalize schedules ------------------- */
 function normalizeSchedules(data) {
   const schedules = Array.isArray(data?.schedules) ? data.schedules : [];
   return schedules.map((s) => {
@@ -315,7 +294,7 @@ function normalizeSchedules(data) {
 
     const out = {
       schedule_label: s.schedule_label ?? null,
-      item_name: String(s.item_name || '').trim(),
+      item_name: String(s.item_name || '').trim(), // TRUST the model; don't overwrite later
       description: s.description ?? null,
       billing_type: bt,
       total_price: pickNumber(s.total_price, null),
@@ -327,7 +306,7 @@ function normalizeSchedules(data) {
 
       months_of_service: pickNumber(s.months_of_service, null),
       periods: pickNumber(s.periods, 1),
-      calculated_end_date: s.calculated_end_date || s.end_date || null, // accept either
+      calculated_end_date: s.calculated_end_date || s.end_date || null,
       net_terms: pickNumber(s.net_terms, 0),
       rev_rec_category: s.rev_rec_category ?? null,
 
@@ -376,9 +355,9 @@ function normalizeSchedules(data) {
       }
     }
 
-    // Fallback: if total_price is missing, derive it (from total_value or $amounts in evidence)
+    // Price fallback
     if (out.total_price == null) {
-      const p = fallbackTotalPrice({ ...s, ...out }); // use both raw & normalized fields
+      const p = fallbackTotalPrice({ ...s, ...out });
       if (Number.isFinite(p)) out.total_price = p;
     }
 
@@ -387,9 +366,7 @@ function normalizeSchedules(data) {
   });
 }
 
-/* ----------------------------------------------------------------------------
-   AGREEMENT / CONFIDENCE
----------------------------------------------------------------------------- */
+/* ------------------- Agreement / confidence ------------------- */
 function clamp01(x){ return Math.max(0, Math.min(1, Number(x)||0)); }
 function tokenize(s) { if (!s) return []; return String(s).toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(x => x && x.length > 1); }
 function jaccardTokens(a, b) { const A = new Set(tokenize(a)); const B = new Set(tokenize(b)); if (!A.size && !B.size) return 1; const inter = [...A].filter(x => B.has(x)).length; const union = new Set([...A, ...B]).size; return union ? inter / union : 0; }
@@ -451,9 +428,7 @@ function computeAgreement(first, second) {
   return { enriched, summary: { avg_confidence: avg, min_confidence: min, total_items_run1: first.length, total_items_run2: second.length, unmatched_in_run2: Math.max(0, first.length - used.size) } };
 }
 
-/* ----------------------------------------------------------------------------
-   Date helpers for month computations (service_term / periods)
----------------------------------------------------------------------------- */
+/* ------------------- Date helpers for month math ------------------- */
 function monthsFromDates(startStr, endStr) {
   if (!startStr || !endStr) return null;
   const start = new Date(startStr);
@@ -461,76 +436,46 @@ function monthsFromDates(startStr, endStr) {
   if (isNaN(start) || isNaN(end)) return null;
   const ms = end - start;
   if (!Number.isFinite(ms) || ms <= 0) return null;
-  // Approximate months via 30-day months; round to nearest
-  const months = Math.round(ms / (1000 * 60 * 60 * 24 * 30));
-  return Math.max(1, months);
+  return Math.max(1, Math.round(ms / (1000 * 60 * 60 * 24 * 30))); // ~30-day months
 }
 
-/* ----------------------------------------------------------------------------
-   SERVER-SIDE Garage JSON (strict) — produces the final objects your friend needs
----------------------------------------------------------------------------- */
+/* ------------------- Period logic (now driven by months) ------------------- */
+function periodsFromMonths(unit, every, months) {
+  if (!unit || unit === 'None') return 0;
+  const m = Number(months);
+  const e = Number(every) || 1;
+  if (!Number.isFinite(m) || m <= 0) return 1;
+  if (unit === 'Month(s)')      return Math.max(1, Math.round(m / e));
+  if (unit === 'Year(s)')       return Math.max(1, Math.round(m / (12 * e)));
+  if (unit === 'Week(s)')       return Math.max(1, Math.round((m * 30) / (7 * e)));
+  if (unit === 'Day(s)')        return Math.max(1, Math.round((m * 30) / (1 * e)));
+  if (unit === 'Semi_month(s)') return Math.max(1, Math.round((m * 30) / (15 * e)));
+  return 1;
+}
+
+/* ------------------- Garage JSON builders ------------------- */
 function toGarageBillingType(bt) {
   const map = { 'Flat price': 'FLAT_PRICE', 'Unit price': 'UNIT_PRICE', 'Tier flat price': 'TIER_FLAT_PRICE', 'Tier unit price': 'TIER_UNIT_PRICE' };
   return map[bt] || 'FLAT_PRICE';
 }
-function inferNumberOfPeriods(s, unit, every, periods) {
-  const p = Number(periods);
-  if (Number.isFinite(p) && p > 0) return p;
-
-  // NEW: if start/end exist, derive periods from that month span
-  const mosFromDates = monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date);
-  if (Number.isFinite(mosFromDates) && mosFromDates > 0) {
-    if (unit === 'Month(s)')      return Math.max(1, Math.round(mosFromDates / (every || 1)));
-    if (unit === 'Year(s)')       return Math.max(1, Math.round(mosFromDates / (12 * (every || 1))));
-    if (unit === 'Week(s)')       return Math.max(1, Math.round((mosFromDates * 30) / (7 * (every || 1))));
-    if (unit === 'Day(s)')        return Math.max(1, Math.round((mosFromDates * 30) / (1 * (every || 1))));
-    if (unit === 'Semi_month(s)') return Math.max(1, Math.round((mosFromDates * 30) / (15 * (every || 1))));
-  }
-
-  const mos = Number(s?.months_of_service);
-  if (Number.isFinite(mos) && mos > 0) {
-    if (unit === 'Month(s)') return Math.max(1, Math.round(mos / (every || 1)));
-    if (unit === 'Year(s)')  return Math.max(1, Math.round(mos / (12 * (every || 1))));
-    if (unit === 'Week(s)')  return Math.max(1, Math.round((mos * 30) / (7 * (every || 1))));
-    if (unit === 'Day(s)')   return Math.max(1, Math.round((mos * 30) / (1 * (every || 1))));
-    if (unit === 'Semi_month(s)') return Math.max(1, Math.round((mos * 30) / (15 * (every || 1))));
-  }
-  return (unit && unit !== 'None') ? 1 : 0;
-}
-function toGarageFrequency(s) {
+function toGarageFrequencyWithMonths(s, months) {
   const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
   const unit = s?.frequency_unit;
 
-  // Derive periods with all sources (periods field, months_of_service, or dates)
-  const periods = inferNumberOfPeriods(s, unit, every, s?.periods);
-
+  const number_of_periods = periodsFromMonths(unit, every, months);
   if (!unit || unit === 'None') {
     return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
-    }
-  if (unit === 'Month(s)') {
-    if (every === 3) return { frequency_unit: 'QUARTER', period: 1, number_of_periods: periods };
-    return { frequency_unit: 'MONTH', period: every, number_of_periods: periods };
   }
-  if (unit === 'Year(s)')      return { frequency_unit: 'YEAR', period: every, number_of_periods: periods };
-  if (unit === 'Day(s)')       return { frequency_unit: 'DAYS', period: every, number_of_periods: periods };
-  if (unit === 'Semi_month(s)')return { frequency_unit: 'SEMI_MONTH', period: every, number_of_periods: periods };
-  if (unit === 'Week(s)')      return { frequency_unit: 'DAYS', period: every*7, number_of_periods: periods };
+  if (unit === 'Month(s)') {
+    if (every === 3) return { frequency_unit: 'QUARTER', period: 1, number_of_periods };
+    return { frequency_unit: 'MONTH', period: every, number_of_periods };
+  }
+  if (unit === 'Year(s)')       return { frequency_unit: 'YEAR', period: every, number_of_periods };
+  if (unit === 'Day(s)')        return { frequency_unit: 'DAYS', period: every, number_of_periods };
+  if (unit === 'Semi_month(s)') return { frequency_unit: 'SEMI_MONTH', period: every, number_of_periods };
+  if (unit === 'Week(s)')       return { frequency_unit: 'DAYS', period: every*7, number_of_periods };
   return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
 }
-function toGaragePricingTiers(s) {
-  if (!Array.isArray(s?.tiers) || !s.tiers.length) return [];
-  return s.tiers.map((t, i) => ({
-    tier: i+1,
-    mantissa: t?.price != null ? String(t.price) : null,
-    exponent: '0',
-    condition_value: Number.isFinite(Number(t?.min_quantity)) ? Number(t.min_quantity) : null,
-    condition_operator: t?.min_quantity != null ? 'GREATER_THAN_EQUAL' : null,
-    name: t?.tier_name || t?.applied_when || null
-  }));
-}
-
-// Prefer clean standardized one-time label,
-// but only overwrite if the name is missing/blank to avoid hiding real names.
 function polishOneTimeNameAndDescription(s, g) {
   const text = [s?.schedule_label, s?.item_name, s?.description, s?.rev_rec_category].filter(Boolean).join(' ').toLowerCase();
   const isOneTime = g.frequency_unit === 'NONE' || /one[-\s]?time|setup|implementation|professional services/.test(text);
@@ -539,69 +484,70 @@ function polishOneTimeNameAndDescription(s, g) {
     if (!g.item_description) g.item_description = 'Total one-time fees listed on order form';
   }
 }
-
-// NEW: never leave item_name blank — choose best available label
-function chooseItemName(rawName, integrationItem, scheduleLabel, frequencyUnit) {
-  const name = String(rawName || '').trim();
-  if (name) return name;
-  if (integrationItem) return integrationItem;
-  if (scheduleLabel) return String(scheduleLabel);
-  // default fallback
-  return (frequencyUnit && frequencyUnit !== 'NONE') ? 'Subscription' : 'Implementation & One-Time Services';
-}
-
-// Derive months_of_service with precedence: dates → explicit months → cadence math
 function deriveMonthsOfService(s) {
   const byDates = monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date);
   if (Number.isFinite(byDates) && byDates > 0) return byDates;
-
   const mosRaw = s?.months_of_service;
   if (mosRaw !== null && mosRaw !== undefined) {
     const mosNum = Number(mosRaw);
     if (Number.isFinite(mosNum) && mosNum > 0) return mosNum;
   }
   const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
-  const periods = inferNumberOfPeriods(s, s?.frequency_unit, every, s?.periods);
   const unit = s?.frequency_unit;
+  const p = Number(s?.periods);
+  if (Number.isFinite(p) && p > 0) {
+    if (unit === 'Month(s)')      return every * p;
+    if (unit === 'Year(s)')       return 12 * every * p;
+    if (unit === 'Week(s)')       return Math.round((7 * every * p) / 30);
+    if (unit === 'Day(s)')        return Math.round((every * p) / 30);
+    if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
+  }
   if (!unit || unit === 'None') return 0;
-  if (unit === 'Month(s)')      return every * periods;
-  if (unit === 'Year(s)')       return 12 * every * periods;
-  if (unit === 'Week(s)')       return Math.round((7 * every * periods) / 30);
-  if (unit === 'Day(s)')        return Math.round((every * periods) / 30);
-  if (unit === 'Semi_month(s)') return Math.round((15 * every * periods) / 30);
-  return 0;
+  return 0; // unknown → 0 (we'll still set periods via default rules)
 }
-
 function toGarageRevenueStrict(s) {
-  const { frequency_unit, period, number_of_periods } = toGarageFrequency(s);
+  // 1) derive months first
   const service_term = deriveMonthsOfService(s) || 0;
-  const billing_type = toGarageBillingType(s?.billing_type);
-  const qty = billing_type === 'FLAT_PRICE' ? 1 : (Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : null);
 
-  const mappedIntegration = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
-  const finalItemName = chooseItemName(s?.item_name, mappedIntegration, s?.schedule_label, frequency_unit);
+  // 2) compute frequency (period/number_of_periods) from those months
+  const freq = toGarageFrequencyWithMonths(s, service_term);
+
+  // 3) build core
+  const billing_type = toGarageBillingType(s?.billing_type);
+  const qty = billing_type === 'FLAT_PRICE' ? 1 : (Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : 1);
+  const integration_item = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
 
   const g = {
     service_start_date: s.start_date || '',
     service_term,
     revenue_category: null,
-    item_name: finalItemName || '',
+    item_name: s.item_name || '',           // trust the model’s extracted name
     item_description: s.description || null,
     start_date: s.start_date || '',
-    frequency_unit,
-    period,
-    number_of_periods,
+    frequency_unit: freq.frequency_unit,
+    period: freq.period,
+    number_of_periods: freq.number_of_periods,
     arrears: false,
     billing_type,
     event_to_track: s.event_to_track ?? null,
-    integration_item: mappedIntegration,
+    integration_item,
     discounts: [],
     net_terms: Number.isFinite(Number(s?.net_terms)) ? Number(s.net_terms) : 0,
-    quantity: qty ?? 1,
+    quantity: qty,
     total_price: Number.isFinite(Number(s?.total_price)) ? Number(s.total_price) : 0,
-    pricing_tiers: toGaragePricingTiers(s)
+    pricing_tiers: (Array.isArray(s?.tiers) && s.tiers.length)
+      ? s.tiers.map((t, i) => ({
+          tier: i+1,
+          mantissa: t?.price != null ? String(t.price) : null,
+          exponent: '0',
+          condition_value: Number.isFinite(Number(t?.min_quantity)) ? Number(t.min_quantity) : null,
+          condition_operator: t?.min_quantity != null ? 'GREATER_THAN_EQUAL' : null,
+          name: t?.tier_name || t?.applied_when || null
+        }))
+      : []
   };
 
+  // 4) only polish one-time if the name was missing
   polishOneTimeNameAndDescription(s, g);
   return g;
 }
@@ -609,10 +555,7 @@ function toGarageAllStrict(schedules) {
   return (schedules || []).map(toGarageRevenueStrict);
 }
 
-/* ----------------------------------------------------------------------------
-   /api/extract (POST)
-   Add ?format=garage-only to return { revenue_schedule: [...] } directly.
----------------------------------------------------------------------------- */
+/* ------------------- /api/extract ------------------- */
 app.post('/api/extract', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
@@ -625,7 +568,6 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
       purpose: 'assistants'
     });
 
-    // Run #1
     const response1 = await client.responses.create({
       model: chosenModel,
       input: [
@@ -640,7 +582,6 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
     const data1 = parseModelJson(response1);
     const norm1 = normalizeSchedules(data1);
 
-    // Optional Run #2 for confidence
     let agreement = null;
     if (agreementRuns >= 2) {
       const response2 = await client.responses.create({
@@ -663,12 +604,10 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
     const garage = toGarageAllStrict(norm1);
 
-    // Wrapped array for downstream (your expected shape)
     if (String(format).toLowerCase() === 'garage-only') {
       return res.json({ revenue_schedule: garage });
     }
 
-    // Full object (for UI/debug) + final array included too
     res.json({
       model_used: chosenModel,
       runs: agreementRuns,
@@ -686,30 +625,21 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
   }
 });
 
-/* ----------------------------------------------------------------------------
-   /api/use-contract-assistant (GET) — your friend's endpoint.
-   Default = wrapped array; add &format=full for verbose debug.
----------------------------------------------------------------------------- */
+/* ------------------- /api/use-contract-assistant ------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
   const { contractID, model = 'o3', forceMulti = 'auto', format } = req.query;
   if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
 
   try {
-    // 1) Fetch the PDF from Tabs API
     const pdfResp = await fetch(`https://integrators.prod.api.tabsplatform.com/v3/contracts/${contractID}/file`, {
-      headers: {
-        'accept': 'application/pdf',
-        'Authorization': `${process.env.LUXURY_PRESENCE_TABS_SANDBOX_API_KEY}`
-      }
+      headers: { 'accept': 'application/pdf', 'Authorization': `${process.env.LUXURY_PRESENCE_TABS_SANDBOX_API_KEY}` }
     });
     if (!pdfResp.ok) throw new Error(`Failed to fetch PDF for contract ${contractID}: ${pdfResp.status}`);
 
-    // 2) Save temporarily
     const tempPath = `/tmp/${contractID}.pdf`;
     const buf = Buffer.from(await pdfResp.arrayBuffer());
     await fs.promises.writeFile(tempPath, buf);
 
-    // 3) Upload & extract
     const uploaded = await client.files.create({
       file: await toFile(fs.createReadStream(tempPath), `${contractID}.pdf`),
       purpose: 'assistants'
@@ -731,13 +661,11 @@ app.get('/api/use-contract-assistant', async (req, res) => {
     const normalized = normalizeSchedules(data);
     const garage = toGarageAllStrict(normalized);
 
-    // Default: downstream wrapper
     if (String(format || '').toLowerCase() !== 'full') {
       fs.unlink(tempPath, () => {});
       return res.json({ revenue_schedule: garage });
     }
 
-    // Optional: full payload for debugging
     res.json({
       model_used: model,
       schedules: normalized,
@@ -754,9 +682,7 @@ app.get('/api/use-contract-assistant', async (req, res) => {
   }
 });
 
-/* ----------------------------------------------------------------------------
-   Health
----------------------------------------------------------------------------- */
+/* ------------------- Health ------------------- */
 app.get('/health', async (_req, res) => {
   try {
     const models = await client.models.list();
