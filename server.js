@@ -650,58 +650,84 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 /* ------------------- /api/use-contract-assistant ------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
   const { contractID, model = 'o3', forceMulti = 'auto', format } = req.query;
+  const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
+  if (!entryKey || entryKey !== process.env.USE_CONTRACT_PROCESSING_KEY) return res.status(401).json({ error: 'Invalid or missing entryKey' });
   if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
 
+  let pdfResp;
   try {
-    const pdfResp = await fetch(`https://integrators.prod.api.tabsplatform.com/v3/contracts/${contractID}/file`, {
-      headers: { 'accept': 'application/pdf', 'Authorization': `${process.env.LUXURY_PRESENCE_TABS_SANDBOX_API_KEY}` }
+    pdfResp = await fetch(`https://integrators.prod.api.tabsplatform.com/v3/contracts/${contractID}/file`, {
+      headers: { 'accept': 'application/pdf', 'Authorization': `${process.env.LUXURY_PRESENCE_TABS_API_KEY}` }
     });
     if (!pdfResp.ok) throw new Error(`Failed to fetch PDF for contract ${contractID}: ${pdfResp.status}`);
-
-    const tempPath = `/tmp/${contractID}.pdf`;
-    const buf = Buffer.from(await pdfResp.arrayBuffer());
-    await fs.promises.writeFile(tempPath, buf);
-
-    const uploaded = await client.files.create({
-      file: await toFile(fs.createReadStream(tempPath), `${contractID}.pdf`),
-      purpose: 'assistants'
-    });
-
-    const response = await client.responses.create({
-      model,
-      input: [
-        { role: 'system', content: buildSystemPrompt(forceMulti) },
-        { role: 'user', content: [
-            { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
-            { type: 'input_file', file_id: uploaded.id }
-        ] }
-      ],
-      text: { format: { type: 'json_object' } }
-    });
-
-    const data = parseModelJson(response);
-    const normalized = normalizeSchedules(data);
-    const garage = toGarageAllStrict(normalized);
-
-    if (String(format || '').toLowerCase() !== 'full') {
-      fs.unlink(tempPath, () => {});
-      return res.json({ revenue_schedule: garage });
-    }
-
-    res.json({
-      model_used: model,
-      schedules: normalized,
-      garage_revenue_schedules: garage,
-      model_recommendations: data.model_recommendations ?? null,
-      issues: Array.isArray(data.issues) ? data.issues : [],
-      totals_check: data.totals_check ?? null
-    });
-
-    fs.unlink(tempPath, () => {});
   } catch (err) {
-    console.error('use-contract-assistant error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('PDF fetch error:', err);
+    return res.status(500).json({ error: 'Failed to fetch PDF: ' + err.message });
   }
+  
+  // Convert response to buffer once, outside the retry loop
+  const pdfBuffer = Buffer.from(await pdfResp.arrayBuffer());
+  
+  const maxRetries = 3;
+  const retryDelay = 5000; // 5 seconds
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const tempPath = `/tmp/${contractID}.pdf`;
+      await fs.promises.writeFile(tempPath, pdfBuffer);
+
+      const uploaded = await client.files.create({
+        file: await toFile(fs.createReadStream(tempPath), `${contractID}.pdf`),
+        purpose: 'assistants'
+      });
+
+      const response = await client.responses.create({
+        model,
+        input: [
+          { role: 'system', content: buildSystemPrompt(forceMulti) },
+          { role: 'user', content: [
+              { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
+              { type: 'input_file', file_id: uploaded.id }
+          ] }
+        ],
+        text: { format: { type: 'json_object' } }
+      });
+
+      const data = parseModelJson(response);
+      const normalized = normalizeSchedules(data);
+      const garage = toGarageAllStrict(normalized);
+
+      if (String(format || '').toLowerCase() !== 'full') {
+        fs.unlink(tempPath, () => {});
+        return res.json({ revenue_schedule: garage });
+      }
+
+      res.json({
+        model_used: model,
+        schedules: normalized,
+        garage_revenue_schedules: garage,
+        model_recommendations: data.model_recommendations ?? null,
+        issues: Array.isArray(data.issues) ? data.issues : [],
+        totals_check: data.totals_check ?? null
+      });
+
+      fs.unlink(tempPath, () => {});
+      return; // Success, exit the retry loop
+    } catch (err) {
+      lastError = err;
+      console.error(`use-contract-assistant error (attempt ${attempt}/${maxRetries}):`, err);
+      
+      if (attempt < maxRetries) {
+        console.log(`Retrying in ${retryDelay/1000} seconds...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      }
+    }
+  }
+
+  // All retries failed
+  console.error('use-contract-assistant failed after all retries:', lastError);
+  res.status(500).json({ error: lastError.message });
 });
 
 /* ------------------- Health ------------------- */
