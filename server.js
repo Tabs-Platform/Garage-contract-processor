@@ -205,10 +205,10 @@ function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   return { every, unit };
 }
 
-/* ------------------- Evidence price extraction ------------------- */
+/* ------------------- Evidence & price extraction ------------------- */
 function extractPriceFromEvidenceLikeText(texts) {
   const out = [];
-  // $, US$, or USD  — captures number w/ commas and optional decimals
+  // $, US$, or USD — captures number w/ commas and optional decimals
   const currencyRe = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/gi;
   for (const t of texts) {
     if (!t) continue;
@@ -219,31 +219,45 @@ function extractPriceFromEvidenceLikeText(texts) {
     }
   }
   if (!out.length) return null;
-  // take the last seen (often the line total at end of a row)
+  // take the last seen (often the row total at end of a line)
   return out[out.length - 1];
 }
 
-/* ------------------- Field-based price extraction ------------------- */
+// ---- Accept explicit zero (only when clearly indicated) ----
+const ZERO_TERMS_RE = /\b(?:no\s*charge|free|complimentary|waived|included(?:\s+at\s+no\s+extra\s+cost)?|n\/?c|nc|zero)\b/i;
+const ZERO_CURRENCY_RE = /(?:\$|US\$|USD)\s*0(?:\.00)?\b/i;
+
+// Field lists for price lookup
 const PRICE_FIELDS_PRIMARY = [
-  'total_price',          // our canonical
-  'price',
-  'amount',
-  'per_period_price',
-  'per_period',
-  'annual_price',
-  'monthly_price'
+  'total_price', 'price', 'amount', 'per_period_price', 'per_period', 'annual_price', 'monthly_price'
 ];
 const PRICE_FIELDS_SECONDARY = [
   'setup_fee','one_time_fee','upfront','down_payment','line_total','subtotal'
 ];
 
+function explicitZeroSignal(obj){
+  // field-level explicit 0 (primary/secondary fields)
+  for (const f of [...PRICE_FIELDS_PRIMARY, ...PRICE_FIELDS_SECONDARY]) {
+    const v = toNumberLoose(obj?.[f]);
+    if (v === 0) return `field:${f}`;
+  }
+  // evidence / description / name text signals
+  const texts = [];
+  if (Array.isArray(obj?.evidence)) for (const ev of obj.evidence) if (ev?.snippet) texts.push(ev.snippet);
+  if (obj?.description) texts.push(String(obj.description));
+  if (obj?.item_name)   texts.push(String(obj.item_name));
+  const hay = texts.join(' ');
+  if (ZERO_CURRENCY_RE.test(hay)) return 'currency_text';
+  if (ZERO_TERMS_RE.test(hay))    return 'keyword_text';
+  if (/\b100%\s*(?:discount|off)\b/i.test(hay)) return 'discount_100';
+  return null;
+}
+
 function priceFromFields(obj) {
-  // primary exact order
   for (const f of PRICE_FIELDS_PRIMARY) {
     const v = positive(pickNumber(obj?.[f], null));
     if (v != null) return v;
   }
-  // looser secondary fields
   for (const f of PRICE_FIELDS_SECONDARY) {
     const v = positive(pickNumber(obj?.[f], null));
     if (v != null) return v;
@@ -257,8 +271,16 @@ function priceFromEvidence(obj) {
   if (obj?.item_name)   texts.push(String(obj.item_name));
   return positive(extractPriceFromEvidenceLikeText(texts));
 }
-function bestPrice(obj) {
-  return priceFromFields(obj) ?? priceFromEvidence(obj) ?? null;
+function bestPrice(obj, { allowExplicitZero = true } = {}) {
+  // 1) Try to find a positive price
+  const pos = priceFromFields(obj) ?? priceFromEvidence(obj);
+  if (pos != null) return pos;
+  // 2) If not found, accept 0 only with an explicit zero signal
+  if (allowExplicitZero) {
+    const zr = explicitZeroSignal(obj);
+    if (zr) return 0;
+  }
+  return null;
 }
 
 /* ------------------- Prompt ------------------- */
@@ -350,7 +372,7 @@ function normalizeSchedules(data) {
       item_name: String(s.item_name || '').trim(),
       description: s.description ?? null,
       billing_type: bt,
-      total_price: null, // we will compute below
+      total_price: null, // computed below
       quantity: qty,
       start_date: s.start_date || null,
 
@@ -380,7 +402,7 @@ function normalizeSchedules(data) {
       issues
     };
 
-    // Policy enforcement
+    // Brand/policy enforcement
     if (isLuxuryPresenceHint(s)) {
       out.billing_type = 'Flat price';
       out.quantity = 1;
@@ -408,15 +430,13 @@ function normalizeSchedules(data) {
       }
     }
 
-    // --------- PRICE: model → synonyms → evidence (0 is treated as missing)
-    const pModelOrSyn = bestPrice(s);                 // search original
-    const pEvidence   = pModelOrSyn ?? priceFromEvidence(out); // try normalized evidence if needed
-    const chosen = pModelOrSyn ?? pEvidence ?? null;
-
-    if (positive(chosen) != null) {
+    // --------- PRICE: positive fields → positive evidence → explicit zero
+    const chosen = bestPrice(s) ?? bestPrice(out);
+    if (chosen != null) {
       out.total_price = chosen;
+      if (chosen === 0) out.issues.push('Explicit zero price accepted (waived/free/included).');
     } else {
-      out.total_price = null; // leave null; Garage conversion will still try evidence again before defaulting to 0
+      out.total_price = null;
       out.issues.push('Price missing after all fallbacks; verify contract line.');
     }
 
@@ -551,8 +571,16 @@ function toGarageRevenueStrict(s) {
 
   // 4) PRICE (no total_value fallback)
   let finalPrice = positive(pickNumber(s?.total_price, null));
-  if (finalPrice == null) finalPrice = bestPrice(s);        // try synonyms and evidence again
-  if (finalPrice == null) finalPrice = 0;                   // last resort; should be rare
+  if (finalPrice == null) {
+    // if normalized total_price is 0 and we have an explicit zero signal, keep 0
+    const tp = pickNumber(s?.total_price, null);
+    if (tp === 0 && explicitZeroSignal(s)) {
+      finalPrice = 0;
+    } else {
+      finalPrice = bestPrice(s); // may return positive number or 0 (if explicit zero)
+    }
+  }
+  if (finalPrice == null) finalPrice = 0; // last resort
 
   const g = {
     service_start_date: s.start_date || '',
