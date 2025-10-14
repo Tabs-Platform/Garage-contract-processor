@@ -714,11 +714,11 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-// Vercel uses serverless, Render needs a persistent server
-if (process.env.VERCEL) {
-  // Vercel: export the app for serverless
-  export default app;
-} else {
-  // Render/Local: start the server
-app.listen(PORT, () => console.log(`Garage assistant running on http://localhost:${PORT}`));
+// Vercel uses serverless; Render/Local needs a persistent server
+export default app;
+if (!process.env.VERCEL) {
+  // Bind to 0.0.0.0 and the injected PORT for Render
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Garage assistant running on http://0.0.0.0:${PORT}`);
+  });
 }
