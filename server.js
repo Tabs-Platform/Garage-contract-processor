@@ -649,15 +649,20 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
 /* ------------------- /api/use-contract-assistant ------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
-  const { contractID, model = 'o3', forceMulti = 'auto', format } = req.query;
+  const { contractID, model = 'o3', forceMulti = 'auto', format, env = 'dev' } = req.query;
   const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
   if (!entryKey || entryKey !== process.env.USE_CONTRACT_PROCESSING_KEY) return res.status(401).json({ error: 'Invalid or missing entryKey' });
   if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
 
+  // Determine API endpoint and key based on env parameter
+  const isProd = env.toLowerCase() === 'prod';
+  const apiEndpoint = isProd ? 'https://integrators.prod.api.tabsplatform.com' : 'https://integrators.dev.api.tabsplatform.com';
+  const apiKey = isProd ? process.env.LUXURY_PRESENCE_TABS_API_KEY : process.env.LUXURY_PRESENCE_TABS_DEV_API_KEY;
+
   let pdfResp;
   try {
-    pdfResp = await fetch(`https://integrators.prod.api.tabsplatform.com/v3/contracts/${contractID}/file`, {
-      headers: { 'accept': 'application/pdf', 'Authorization': `${process.env.LUXURY_PRESENCE_TABS_API_KEY}` }
+    pdfResp = await fetch(`${apiEndpoint}/v3/contracts/${contractID}/file`, {
+      headers: { 'accept': 'application/pdf', 'Authorization': `${apiKey}` }
     });
     if (!pdfResp.ok) throw new Error(`Failed to fetch PDF for contract ${contractID}: ${pdfResp.status}`);
   } catch (err) {
