@@ -695,7 +695,7 @@ app.get('/api/use-contract-assistant', async (req, res) => {
   // Determine API endpoint and key based on env parameter
   const isProd = env.toLowerCase() === 'prod';
   const apiEndpoint = isProd ? 'https://integrators.prod.api.tabsplatform.com' : 'https://integrators.dev.api.tabsplatform.com';
-  const apiKey = USE_CONTRACT_PROCESSING_KEY;
+  const apiKey = process.env.USE_CONTRACT_PROCESSING_KEY;
 
   let pdfResp;
   try {
