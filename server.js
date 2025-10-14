@@ -277,7 +277,7 @@ function periodsFromMonths(unit, every, months) {
   if (unit === 'Month(s)')      return Math.max(1, Math.round(m / e));
   if (unit === 'Year(s)')       return Math.max(1, Math.round(m / (12 * e)));
   if (unit === 'Week(s)')       return Math.max(1, Math.round((m * 30) / (7 * e)));
-  if (unit === 'Day(s)')        return Math.max(1, Math.round((m * 30) / (1 * e)));
+  if (unit === 'Day(s)')        return Math.max(1, Math.round((every * m * 30) / (30 * e)));
   if (unit === 'Semi_month(s)') return Math.max(1, Math.round((m * 30) / (15 * e)));
   return 1;
 }
@@ -285,7 +285,8 @@ function periodsFromMonths(unit, every, months) {
 /* ------------------- Price fallbacks ------------------- */
 function extractPriceFromEvidenceLikeText(texts) {
   const out = [];
-  const currencyRe = /\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/g;
+  // accept $, US$, and USD
+  const currencyRe = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/gi;
   for (const t of texts) {
     if (!t) continue;
     let m;
@@ -324,13 +325,16 @@ function perPeriodFromTotalValue(s) {
 }
 
 function fallbackTotalPrice(s) {
-  // 1) explicit numeric field (string or number)
-  const loose = pickNumber(s?.total_price, null);
-  if (loose != null) return loose;
+  // 1) explicit numeric fields (string or number) with common synonyms
+  const candidateFields = ['total_price','price','amount','per_period_price','per_period','annual_price','monthly_price'];
+  for (const f of candidateFields) {
+    const v = pickNumber(s?.[f], null);
+    if (Number.isFinite(v) && v > 0) return v;
+  }
 
   // 2) back out from total_value
   const fromTV = perPeriodFromTotalValue(s);
-  if (fromTV != null) return fromTV;
+  if (Number.isFinite(fromTV) && fromTV > 0) return fromTV;
 
   // 3) parse from evidence/name/description text
   const texts = [];
@@ -338,7 +342,7 @@ function fallbackTotalPrice(s) {
   if (s?.description) texts.push(String(s.description));
   if (s?.item_name)   texts.push(String(s.item_name));
   const p = extractPriceFromEvidenceLikeText(texts);
-  if (p != null) return p;
+  if (Number.isFinite(p) && p > 0) return p;
 
   return null;
 }
@@ -418,13 +422,16 @@ function normalizeSchedules(data) {
       }
     }
 
-    // Robust price recovery
-    if (out.total_price == null) {
+    // Robust price recovery — treat 0 as missing
+    if (!(Number.isFinite(out.total_price) && out.total_price > 0)) {
       const p = fallbackTotalPrice({ ...s, ...out });
-      if (Number.isFinite(p)) out.total_price = p;
+      if (Number.isFinite(p) && p > 0) out.total_price = p;
     }
 
-    out.total_value = computeTotalValue(out);
+    // Preserve model-provided total_value if present; else compute
+    const modelTotalValue = pickNumber(s?.total_value, null);
+    out.total_value = computeTotalValue(out) ?? modelTotalValue;
+
     return out;
   });
 }
@@ -556,19 +563,19 @@ function toGarageRevenueStrict(s) {
 
   // robust price: loose parse, else from total_value, else evidence
   let finalPrice = pickNumber(s?.total_price, null);
-  if (finalPrice == null) {
+  if (!(Number.isFinite(finalPrice) && finalPrice > 0)) {
     const fromTV = perPeriodFromTotalValue(s);
-    if (fromTV != null) finalPrice = fromTV;
+    if (Number.isFinite(fromTV) && fromTV > 0) finalPrice = fromTV;
   }
-  if (finalPrice == null) {
+  if (!(Number.isFinite(finalPrice) && finalPrice > 0)) {
     const texts = [];
     if (Array.isArray(s?.evidence)) for (const ev of s.evidence) if (ev?.snippet) texts.push(ev.snippet);
     if (s?.description) texts.push(String(s.description));
     if (s?.item_name)   texts.push(String(s.item_name));
     const p = extractPriceFromEvidenceLikeText(texts);
-    if (p != null) finalPrice = p;
+    if (Number.isFinite(p) && p > 0) finalPrice = p;
   }
-  if (finalPrice == null) finalPrice = 0;
+  if (!Number.isFinite(finalPrice)) finalPrice = 0;
 
   const g = {
     service_start_date: s.start_date || '',
