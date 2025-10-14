@@ -140,7 +140,7 @@ function toNumberLoose(v) {
   if (v == null) return null;
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   if (typeof v === 'string') {
-    // grab first numeric group (handles "$1,200.00", "USD 3000", etc.)
+    // first numeric group (handles "$1,200.00", "USD 3000", etc.)
     const m = v.match(/-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?/);
     if (!m) return null;
     const n = Number(m[0].replace(/,/g, ''));
@@ -157,6 +157,9 @@ function pickNumber(n, fallback = null) {
   const x = toNumberLoose(n);
   return x == null ? fallback : x;
 }
+function positive(n){ return Number.isFinite(n) && n > 0 ? n : null; }
+
+/* ------------------- Brand / heuristics ------------------- */
 function isLuxuryPresenceHint(s) {
   const parts = []
     .concat(s?.item_name || [], s?.description || [])
@@ -201,13 +204,61 @@ function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   if (unit === 'None') every = 1;
   return { every, unit };
 }
-function computeTotalValue(s) {
-  const periods = s.frequency_unit === 'None' ? 1 : pickNumber(s.periods, 1);
-  const price   = pickNumber(s.total_price, null);
-  if (price != null) return +(price * periods).toFixed(2);
-  const ppu = pickNumber(s.price_per_unit, null);
-  if (ppu != null) return +(ppu * periods).toFixed(2);
+
+/* ------------------- Evidence price extraction ------------------- */
+function extractPriceFromEvidenceLikeText(texts) {
+  const out = [];
+  // $, US$, or USD  — captures number w/ commas and optional decimals
+  const currencyRe = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/gi;
+  for (const t of texts) {
+    if (!t) continue;
+    let m;
+    while ((m = currencyRe.exec(String(t)))) {
+      const n = Number(String(m[1]).replace(/,/g, ''));
+      if (Number.isFinite(n) && n > 0) out.push(n);
+    }
+  }
+  if (!out.length) return null;
+  // take the last seen (often the line total at end of a row)
+  return out[out.length - 1];
+}
+
+/* ------------------- Field-based price extraction ------------------- */
+const PRICE_FIELDS_PRIMARY = [
+  'total_price',          // our canonical
+  'price',
+  'amount',
+  'per_period_price',
+  'per_period',
+  'annual_price',
+  'monthly_price'
+];
+const PRICE_FIELDS_SECONDARY = [
+  'setup_fee','one_time_fee','upfront','down_payment','line_total','subtotal'
+];
+
+function priceFromFields(obj) {
+  // primary exact order
+  for (const f of PRICE_FIELDS_PRIMARY) {
+    const v = positive(pickNumber(obj?.[f], null));
+    if (v != null) return v;
+  }
+  // looser secondary fields
+  for (const f of PRICE_FIELDS_SECONDARY) {
+    const v = positive(pickNumber(obj?.[f], null));
+    if (v != null) return v;
+  }
   return null;
+}
+function priceFromEvidence(obj) {
+  const texts = [];
+  if (Array.isArray(obj?.evidence)) for (const ev of obj.evidence) if (ev?.snippet) texts.push(ev.snippet);
+  if (obj?.description) texts.push(String(obj.description));
+  if (obj?.item_name)   texts.push(String(obj.item_name));
+  return positive(extractPriceFromEvidenceLikeText(texts));
+}
+function bestPrice(obj) {
+  return priceFromFields(obj) ?? priceFromEvidence(obj) ?? null;
 }
 
 /* ------------------- Prompt ------------------- */
@@ -259,7 +310,7 @@ function parseModelJson(apiResponse) {
   }
 }
 
-/* ------------------- Dates → months helpers ------------------- */
+/* ------------------- Dates → months helpers (for frequency only) ------------------- */
 function monthsFromDates(startStr, endStr) {
   if (!startStr || !endStr) return null;
   const start = new Date(startStr);
@@ -282,72 +333,7 @@ function periodsFromMonths(unit, every, months) {
   return 1;
 }
 
-/* ------------------- Price fallbacks ------------------- */
-function extractPriceFromEvidenceLikeText(texts) {
-  const out = [];
-  // accept $, US$, and USD
-  const currencyRe = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/gi;
-  for (const t of texts) {
-    if (!t) continue;
-    let m;
-    while ((m = currencyRe.exec(String(t)))) {
-      const n = Number(String(m[1]).replace(/,/g, ''));
-      if (Number.isFinite(n) && n > 0) out.push(n);
-    }
-  }
-  if (!out.length) return null;
-  return out[out.length - 1];
-}
-
-// derive per-period price from total_value if needed
-function perPeriodFromTotalValue(s) {
-  const unit = s?.frequency_unit;
-  const recurring = unit && unit !== 'None';
-  const every = pickNumber(s?.frequency_every, 1);
-  const months =
-    monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date)
-    ?? pickNumber(s?.months_of_service, null)
-    ?? (() => {
-         const p = pickNumber(s?.periods, null);
-         if (p == null) return null;
-         if (unit === 'Month(s)')      return every * p;
-         if (unit === 'Year(s)')       return 12 * every * p;
-         if (unit === 'Week(s)')       return Math.round((7 * every * p) / 30);
-         if (unit === 'Day(s)')        return Math.round((every * p) / 30);
-         if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
-         return null;
-       })();
-  const periods = periodsFromMonths(unit, every, months);
-  const tv = pickNumber(s?.total_value, null);
-  if (tv == null) return null;
-  if (recurring && periods > 0) return +(tv / periods).toFixed(2);
-  return tv;
-}
-
-function fallbackTotalPrice(s) {
-  // 1) explicit numeric fields (string or number) with common synonyms
-  const candidateFields = ['total_price','price','amount','per_period_price','per_period','annual_price','monthly_price'];
-  for (const f of candidateFields) {
-    const v = pickNumber(s?.[f], null);
-    if (Number.isFinite(v) && v > 0) return v;
-  }
-
-  // 2) back out from total_value
-  const fromTV = perPeriodFromTotalValue(s);
-  if (Number.isFinite(fromTV) && fromTV > 0) return fromTV;
-
-  // 3) parse from evidence/name/description text
-  const texts = [];
-  if (Array.isArray(s?.evidence)) for (const ev of s.evidence) if (ev?.snippet) texts.push(ev.snippet);
-  if (s?.description) texts.push(String(s.description));
-  if (s?.item_name)   texts.push(String(s.item_name));
-  const p = extractPriceFromEvidenceLikeText(texts);
-  if (Number.isFinite(p) && p > 0) return p;
-
-  return null;
-}
-
-/* ------------------- Normalize schedules ------------------- */
+/* ------------------- Normalize schedules (NO total_value) ------------------- */
 function normalizeSchedules(data) {
   const schedules = Array.isArray(data?.schedules) ? data.schedules : [];
   return schedules.map((s) => {
@@ -361,10 +347,10 @@ function normalizeSchedules(data) {
 
     const out = {
       schedule_label: s.schedule_label ?? null,
-      item_name: String(s.item_name || '').trim(), // trust the model
+      item_name: String(s.item_name || '').trim(),
       description: s.description ?? null,
       billing_type: bt,
-      total_price: pickNumber(s.total_price, null), // may be null; we'll fill below
+      total_price: null, // we will compute below
       quantity: qty,
       start_date: s.start_date || null,
 
@@ -422,15 +408,17 @@ function normalizeSchedules(data) {
       }
     }
 
-    // Robust price recovery — treat 0 as missing
-    if (!(Number.isFinite(out.total_price) && out.total_price > 0)) {
-      const p = fallbackTotalPrice({ ...s, ...out });
-      if (Number.isFinite(p) && p > 0) out.total_price = p;
-    }
+    // --------- PRICE: model → synonyms → evidence (0 is treated as missing)
+    const pModelOrSyn = bestPrice(s);                 // search original
+    const pEvidence   = pModelOrSyn ?? priceFromEvidence(out); // try normalized evidence if needed
+    const chosen = pModelOrSyn ?? pEvidence ?? null;
 
-    // Preserve model-provided total_value if present; else compute
-    const modelTotalValue = pickNumber(s?.total_value, null);
-    out.total_value = computeTotalValue(out) ?? modelTotalValue;
+    if (positive(chosen) != null) {
+      out.total_price = chosen;
+    } else {
+      out.total_price = null; // leave null; Garage conversion will still try evidence again before defaulting to 0
+      out.issues.push('Price missing after all fallbacks; verify contract line.');
+    }
 
     return out;
   });
@@ -550,32 +538,21 @@ function deriveMonthsOfService(s) {
   return 0;
 }
 function toGarageRevenueStrict(s) {
-  // 1) derive months first
+  // 1) derive months first (for frequency only)
   const service_term = deriveMonthsOfService(s) || 0;
 
-  // 2) compute frequency (period/number_of_periods) from those months
+  // 2) compute frequency fields
   const freq = toGarageFrequencyWithMonths(s, service_term);
 
-  // 3) build core
+  // 3) core fields
   const billing_type = toGarageBillingType(s?.billing_type);
   const qty = billing_type === 'FLAT_PRICE' ? 1 : pickNumber(s?.quantity, 1);
   const integration_item = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
 
-  // robust price: loose parse, else from total_value, else evidence
-  let finalPrice = pickNumber(s?.total_price, null);
-  if (!(Number.isFinite(finalPrice) && finalPrice > 0)) {
-    const fromTV = perPeriodFromTotalValue(s);
-    if (Number.isFinite(fromTV) && fromTV > 0) finalPrice = fromTV;
-  }
-  if (!(Number.isFinite(finalPrice) && finalPrice > 0)) {
-    const texts = [];
-    if (Array.isArray(s?.evidence)) for (const ev of s.evidence) if (ev?.snippet) texts.push(ev.snippet);
-    if (s?.description) texts.push(String(s.description));
-    if (s?.item_name)   texts.push(String(s.item_name));
-    const p = extractPriceFromEvidenceLikeText(texts);
-    if (Number.isFinite(p) && p > 0) finalPrice = p;
-  }
-  if (!Number.isFinite(finalPrice)) finalPrice = 0;
+  // 4) PRICE (no total_value fallback)
+  let finalPrice = positive(pickNumber(s?.total_price, null));
+  if (finalPrice == null) finalPrice = bestPrice(s);        // try synonyms and evidence again
+  if (finalPrice == null) finalPrice = 0;                   // last resort; should be rare
 
   const g = {
     service_start_date: s.start_date || '',
@@ -607,7 +584,7 @@ function toGarageRevenueStrict(s) {
       : []
   };
 
-  // 4) only polish one-time if the name was missing
+  // 5) one-time polish
   polishOneTimeNameAndDescription(s, g);
   return g;
 }
@@ -693,7 +670,7 @@ app.get('/api/use-contract-assistant', async (req, res) => {
   if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
 
   // Determine API endpoint and key based on env parameter
-  const isProd = env.toLowerCase() === 'prod';
+  const isProd = String(env || '').toLowerCase() === 'prod';
   const apiEndpoint = isProd ? 'https://integrators.prod.api.tabsplatform.com' : 'https://integrators.dev.api.tabsplatform.com';
   const apiKey = isProd ? process.env.LUXURY_PRESENCE_TABS_API_KEY : process.env.LUXURY_PRESENCE_TABS_DEV_API_KEY;
 
@@ -760,9 +737,7 @@ app.get('/api/use-contract-assistant', async (req, res) => {
     } catch (err) {
       lastError = err;
       console.error(`use-contract-assistant error (attempt ${attempt}/${maxRetries}):`, err);
-      
       if (attempt < maxRetries) {
-        console.log(`Retrying in ${retryDelay/1000} seconds...`);
         await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
     }
