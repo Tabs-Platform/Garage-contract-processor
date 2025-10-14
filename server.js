@@ -745,7 +745,9 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(PORT, () => console.log(`Garage assistant running on http://localhost:${PORT}`));
-}
+app.listen(PORT, () => {
+  console.log(`Garage assistant running on port ${PORT}`);
+});
+
 export default app;
+
