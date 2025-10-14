@@ -202,8 +202,8 @@ function computeTotalValue(s) {
 function buildSystemPrompt(forceMulti = 'auto') {
   const multiHint =
     forceMulti === 'on'
-      ? 'ALWAYS enumerate multiple schedules if plausible.'
-      : forceMulti === 'off'
+    ? 'ALWAYS enumerate multiple schedules if plausible.'
+    : forceMulti === 'off'
       ? 'Return exactly the items you are certain of; do not search for additional schedules.'
       : 'Decide whether multiple schedules exist; if there is evidence (multiple fees, renewal tables, “co-term”, “expansion”, etc.) set model_recommendations.force_multi=true and enumerate them.';
 
@@ -596,7 +596,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
         { role: 'system', content: buildSystemPrompt(forceMulti) },
         { role: 'user',   content: [
             { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
-            { type: 'input_file', file_id: uploaded.id }
+          { type: 'input_file', file_id: uploaded.id }
         ] }
       ],
       text: { format: { type: 'json_object' } }
@@ -714,7 +714,11 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(PORT, () => console.log(`Garage assistant running on http://localhost:${PORT}`));
+// Vercel uses serverless, Render needs a persistent server
+if (process.env.VERCEL) {
+  // Vercel: export the app for serverless
+  export default app;
+} else {
+  // Render/Local: start the server
+app.listen(PORT, () => console.log(`Garage assistant running on http://localhost:${PORT}`));
 }
-export default app;
