@@ -135,11 +135,27 @@ function mapIntegrationItem(itemName) {
   return hit ? hit.val : null;
 }
 
-/* ------------------- Normalization & guardrails ------------------- */
+/* ------------------- Helpers: numbers, enums, etc. ------------------- */
+function toNumberLoose(v) {
+  if (v == null) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') {
+    // grab first numeric group (handles "$1,200.00", "USD 3000", etc.)
+    const m = v.match(/-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?/);
+    if (!m) return null;
+    const n = Number(m[0].replace(/,/g, ''));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
 function clampEnum(value, allowed, fallback) {
   if (!value || typeof value !== 'string') return fallback;
   const byLower = new Map(allowed.map(v => [v.toLowerCase(), v]));
   return byLower.get(value.toLowerCase()) || fallback;
+}
+function pickNumber(n, fallback = null) {
+  const x = toNumberLoose(n);
+  return x == null ? fallback : x;
 }
 function isLuxuryPresenceHint(s) {
   const parts = []
@@ -155,7 +171,7 @@ function hasStrongUnitEvidence(s) {
   const hay = parts.join(' ').toLowerCase();
   const perPattern = /\b(per|each|\/)\s*(seat|user|impression|click|lead|unit|order|transaction|visit|listing|ad|sku|gb|hour|minute|api call|api|sms|email|message|device|location|month|year)s?\b/;
   const usageWords = /\b(overage|usage|metered|consumption|rate\s*card|per[-\s]*use)\b/;
-  const hasPPU = Number.isFinite(Number(s?.price_per_unit));
+  const hasPPU = Number.isFinite(pickNumber(s?.price_per_unit));
   const hasUnitLabel = !!(s?.unit_label && String(s.unit_label).trim());
   const tierCount = Array.isArray(s?.tiers) ? s.tiers.length : 0;
   return perPattern.test(hay) || usageWords.test(hay) || (hasPPU && hasUnitLabel) || tierCount > 0;
@@ -184,10 +200,6 @@ function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   }
   if (unit === 'None') every = 1;
   return { every, unit };
-}
-function pickNumber(n, fallback = null) {
-  const x = Number(n);
-  return Number.isFinite(x) ? x : fallback;
 }
 function computeTotalValue(s) {
   const periods = s.frequency_unit === 'None' ? 1 : pickNumber(s.periods, 1);
@@ -247,7 +259,7 @@ function parseModelJson(apiResponse) {
   }
 }
 
-/* ------------------- Date helpers for month math ------------------- */
+/* ------------------- Dates → months helpers ------------------- */
 function monthsFromDates(startStr, endStr) {
   if (!startStr || !endStr) return null;
   const start = new Date(startStr);
@@ -257,8 +269,6 @@ function monthsFromDates(startStr, endStr) {
   if (!Number.isFinite(ms) || ms <= 0) return null;
   return Math.max(1, Math.round(ms / (1000 * 60 * 60 * 24 * 30))); // ~30-day months
 }
-
-/* ------------------- Period logic (driven by months) ------------------- */
 function periodsFromMonths(unit, every, months) {
   if (!unit || unit === 'None') return 0;
   const m = Number(months);
@@ -267,7 +277,7 @@ function periodsFromMonths(unit, every, months) {
   if (unit === 'Month(s)')      return Math.max(1, Math.round(m / e));
   if (unit === 'Year(s)')       return Math.max(1, Math.round(m / (12 * e)));
   if (unit === 'Week(s)')       return Math.max(1, Math.round((m * 30) / (7 * e)));
-  if (unit === 'Day(s)')        return Math.max(1, Math.round((m * 30) / (1 * e)));
+  if (unit === 'Day(s)')        return Math.max(1, Math.round((every * m * 30) / (30 * e)));
   if (unit === 'Semi_month(s)') return Math.max(1, Math.round((m * 30) / (15 * e)));
   return 1;
 }
@@ -275,7 +285,8 @@ function periodsFromMonths(unit, every, months) {
 /* ------------------- Price fallbacks ------------------- */
 function extractPriceFromEvidenceLikeText(texts) {
   const out = [];
-  const currencyRe = /\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/g;
+  // accept $, US$, and USD
+  const currencyRe = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/gi;
   for (const t of texts) {
     if (!t) continue;
     let m;
@@ -288,19 +299,17 @@ function extractPriceFromEvidenceLikeText(texts) {
   return out[out.length - 1];
 }
 
-// FIXED: no more inferNumberOfPeriods — compute from months instead
-function fallbackTotalPrice(s) {
+// derive per-period price from total_value if needed
+function perPeriodFromTotalValue(s) {
   const unit = s?.frequency_unit;
   const recurring = unit && unit !== 'None';
-  const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
-
-  // derive months (dates → explicit months → existing periods math)
+  const every = pickNumber(s?.frequency_every, 1);
   const months =
     monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date)
-    ?? (Number.isFinite(Number(s?.months_of_service)) ? Number(s.months_of_service) : null)
+    ?? pickNumber(s?.months_of_service, null)
     ?? (() => {
-         const p = Number(s?.periods);
-         if (!Number.isFinite(p) || p <= 0) return null;
+         const p = pickNumber(s?.periods, null);
+         if (p == null) return null;
          if (unit === 'Month(s)')      return every * p;
          if (unit === 'Year(s)')       return 12 * every * p;
          if (unit === 'Week(s)')       return Math.round((7 * every * p) / 30);
@@ -308,23 +317,34 @@ function fallbackTotalPrice(s) {
          if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
          return null;
        })();
-
   const periods = periodsFromMonths(unit, every, months);
+  const tv = pickNumber(s?.total_value, null);
+  if (tv == null) return null;
+  if (recurring && periods > 0) return +(tv / periods).toFixed(2);
+  return tv;
+}
 
-  // 1) If the model provided a total_value (whole term), back into per-period price
-  if (Number.isFinite(Number(s?.total_value))) {
-    const tv = Number(s.total_value);
-    if (recurring && periods > 0) return +(tv / periods).toFixed(2);
-    return tv;
+function fallbackTotalPrice(s) {
+  // 1) explicit numeric fields (string or number) with common synonyms
+  const candidateFields = ['total_price','price','amount','per_period_price','per_period','annual_price','monthly_price'];
+  for (const f of candidateFields) {
+    const v = pickNumber(s?.[f], null);
+    if (Number.isFinite(v) && v > 0) return v;
   }
 
-  // 2) Parse a price from evidence/description/name
+  // 2) back out from total_value
+  const fromTV = perPeriodFromTotalValue(s);
+  if (Number.isFinite(fromTV) && fromTV > 0) return fromTV;
+
+  // 3) parse from evidence/name/description text
   const texts = [];
   if (Array.isArray(s?.evidence)) for (const ev of s.evidence) if (ev?.snippet) texts.push(ev.snippet);
   if (s?.description) texts.push(String(s.description));
   if (s?.item_name)   texts.push(String(s.item_name));
   const p = extractPriceFromEvidenceLikeText(texts);
-  return Number.isFinite(p) ? p : null;
+  if (Number.isFinite(p) && p > 0) return p;
+
+  return null;
 }
 
 /* ------------------- Normalize schedules ------------------- */
@@ -341,10 +361,10 @@ function normalizeSchedules(data) {
 
     const out = {
       schedule_label: s.schedule_label ?? null,
-      item_name: String(s.item_name || '').trim(), // TRUST the model; don't overwrite later
+      item_name: String(s.item_name || '').trim(), // trust the model
       description: s.description ?? null,
       billing_type: bt,
-      total_price: pickNumber(s.total_price, null),
+      total_price: pickNumber(s.total_price, null), // may be null; we'll fill below
       quantity: qty,
       start_date: s.start_date || null,
 
@@ -402,13 +422,16 @@ function normalizeSchedules(data) {
       }
     }
 
-    // Price fallback (now uses periodsFromMonths via fallbackTotalPrice)
-    if (out.total_price == null) {
+    // Robust price recovery — treat 0 as missing
+    if (!(Number.isFinite(out.total_price) && out.total_price > 0)) {
       const p = fallbackTotalPrice({ ...s, ...out });
-      if (Number.isFinite(p)) out.total_price = p;
+      if (Number.isFinite(p) && p > 0) out.total_price = p;
     }
 
-    out.total_value = computeTotalValue(out);
+    // Preserve model-provided total_value if present; else compute
+    const modelTotalValue = pickNumber(s?.total_value, null);
+    out.total_value = computeTotalValue(out) ?? modelTotalValue;
+
     return out;
   });
 }
@@ -481,9 +504,8 @@ function toGarageBillingType(bt) {
   return map[bt] || 'FLAT_PRICE';
 }
 function toGarageFrequencyWithMonths(s, months) {
-  const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
+  const every = pickNumber(s?.frequency_every, 1);
   const unit = s?.frequency_unit;
-
   const number_of_periods = periodsFromMonths(unit, every, months);
   if (!unit || unit === 'None') {
     return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
@@ -511,13 +533,13 @@ function deriveMonthsOfService(s) {
   if (Number.isFinite(byDates) && byDates > 0) return byDates;
   const mosRaw = s?.months_of_service;
   if (mosRaw !== null && mosRaw !== undefined) {
-    const mosNum = Number(mosRaw);
-    if (Number.isFinite(mosNum) && mosNum > 0) return mosNum;
+    const mosNum = pickNumber(mosRaw, null);
+    if (mosNum != null && mosNum > 0) return mosNum;
   }
-  const every = Number.isFinite(Number(s?.frequency_every)) ? Number(s.frequency_every) : 1;
+  const every = pickNumber(s?.frequency_every, 1);
   const unit = s?.frequency_unit;
-  const p = Number(s?.periods);
-  if (Number.isFinite(p) && p > 0) {
+  const p = pickNumber(s?.periods, null);
+  if (p != null && p > 0) {
     if (unit === 'Month(s)')      return every * p;
     if (unit === 'Year(s)')       return 12 * every * p;
     if (unit === 'Week(s)')       return Math.round((7 * every * p) / 30);
@@ -536,14 +558,30 @@ function toGarageRevenueStrict(s) {
 
   // 3) build core
   const billing_type = toGarageBillingType(s?.billing_type);
-  const qty = billing_type === 'FLAT_PRICE' ? 1 : (Number.isFinite(Number(s?.quantity)) ? Number(s.quantity) : 1);
+  const qty = billing_type === 'FLAT_PRICE' ? 1 : pickNumber(s?.quantity, 1);
   const integration_item = mapIntegrationItem(s?.item_name) ?? s?.integration_item ?? null;
+
+  // robust price: loose parse, else from total_value, else evidence
+  let finalPrice = pickNumber(s?.total_price, null);
+  if (!(Number.isFinite(finalPrice) && finalPrice > 0)) {
+    const fromTV = perPeriodFromTotalValue(s);
+    if (Number.isFinite(fromTV) && fromTV > 0) finalPrice = fromTV;
+  }
+  if (!(Number.isFinite(finalPrice) && finalPrice > 0)) {
+    const texts = [];
+    if (Array.isArray(s?.evidence)) for (const ev of s.evidence) if (ev?.snippet) texts.push(ev.snippet);
+    if (s?.description) texts.push(String(s.description));
+    if (s?.item_name)   texts.push(String(s.item_name));
+    const p = extractPriceFromEvidenceLikeText(texts);
+    if (Number.isFinite(p) && p > 0) finalPrice = p;
+  }
+  if (!Number.isFinite(finalPrice)) finalPrice = 0;
 
   const g = {
     service_start_date: s.start_date || '',
     service_term,
     revenue_category: null,
-    item_name: s.item_name || '',           // trust the model’s extracted name
+    item_name: s.item_name || '',
     item_description: s.description || null,
     start_date: s.start_date || '',
     frequency_unit: freq.frequency_unit,
@@ -554,15 +592,15 @@ function toGarageRevenueStrict(s) {
     event_to_track: s.event_to_track ?? null,
     integration_item,
     discounts: [],
-    net_terms: Number.isFinite(Number(s?.net_terms)) ? Number(s.net_terms) : 0,
+    net_terms: pickNumber(s?.net_terms, 0),
     quantity: qty,
-    total_price: Number.isFinite(Number(s?.total_price)) ? Number(s.total_price) : 0,
+    total_price: finalPrice,
     pricing_tiers: (Array.isArray(s?.tiers) && s.tiers.length)
       ? s.tiers.map((t, i) => ({
           tier: i+1,
-          mantissa: t?.price != null ? String(t.price) : null,
+          mantissa: t?.price != null ? String(pickNumber(t.price, 0)) : null,
           exponent: '0',
-          condition_value: Number.isFinite(Number(t?.min_quantity)) ? Number(t.min_quantity) : null,
+          condition_value: pickNumber(t?.min_quantity, null),
           condition_operator: t?.min_quantity != null ? 'GREATER_THAN_EQUAL' : null,
           name: t?.tier_name || t?.applied_when || null
         }))
