@@ -688,8 +688,8 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 /* ------------------- /api/use-contract-assistant ------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
   const { contractID, model = 'o3', forceMulti = 'auto', format, env = 'dev' } = req.query;
-  const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
-  if (!entryKey || entryKey !== process.env.USE_CONTRACT_PROCESSING_KEY) return res.status(401).json({ error: 'Invalid or missing entryKey' });
+  //const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
+  //if (!entryKey || entryKey !== process.env.USE_CONTRACT_PROCESSING_KEY) return res.status(401).json({ error: 'Invalid or missing entryKey' });
   if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
 
   // Determine API endpoint and key based on env parameter
