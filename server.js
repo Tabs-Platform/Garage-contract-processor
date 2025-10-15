@@ -191,7 +191,8 @@ function normalizeBillingType(bt, hint = {}) {
 function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   let every = Number.isFinite(Number(rawEvery)) ? Number(rawEvery) : 1;
   let unit  = clampEnum(rawUnit, FREQ_UNITS, null);
-  const txt = (rawText || '').toLowerCase();
+  // FIX: cast to string to avoid `.toLowerCase` on non-strings
+  const txt = String(rawText ?? '').toLowerCase();
   if (!unit) {
     if (!txt || txt === 'none' || txt.includes('one-time')) { unit = 'None'; every = 1; }
     else if (txt.includes('annual'))  { unit = 'Year(s)';  every = 1; }
@@ -206,42 +207,53 @@ function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
 }
 
 /* ------------------- Evidence & price extraction ------------------- */
-function extractPriceFromEvidenceLikeText(texts) {
-  const out = [];
-  // $, US$, or USD — captures number w/ commas and optional decimals
-  const currencyRe = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/gi;
-  for (const t of texts) {
-    if (!t) continue;
+/** Context-aware price picker: prefer values whose nearby words match frequency / 'total' cues; down-weight discounts/taxes. */
+function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
+  const candidates = [];
+  const re = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})|[0-9]+(?:\.\d{2})?)/gi;
+  for (const raw of texts) {
+    if (!raw) continue;
+    const s = String(raw);
     let m;
-    while ((m = currencyRe.exec(String(t)))) {
-      const n = Number(String(m[1]).replace(/,/g, ''));
-      if (Number.isFinite(n) && n > 0) out.push(n);
+    while ((m = re.exec(s))) {
+      const val = Number(m[1].replace(/,/g, ''));
+      if (!Number.isFinite(val) || val <= 0) continue;
+      const start = m.index, end = re.lastIndex;
+      const W = 48;
+      const left  = s.slice(Math.max(0, start - W), start).toLowerCase();
+      const right = s.slice(end, Math.min(s.length, end + W)).toLowerCase();
+      const ring  = left + ' ' + right;
+
+      let score = 0;
+      if (/\b(monthly|per\s*month|per\s*mo\.?)\b/.test(ring)) score += (ctx.frequency_unit === 'Month(s)') ? 3 : -1;
+      if (/\b(annual|yearly|per\s*year)\b/.test(ring))       score += (ctx.frequency_unit === 'Year(s)')  ? 3 : -1;
+      if (/\b(one[-\s]?time|setup|implementation)\b/.test(ring)) score += (ctx.frequency_unit === 'None') ? 3 : -1;
+      if (/\b(line\s*total|total\s*(?:per|for)?\b)/.test(ring)) score += 2;
+      if (/\b(discount|credit|rebate|tax|deposit|retainer|balance\s*due)\b/.test(ring)) score -= 4;
+      if (/\b(each|per\s*(seat|user|lead|click|impression|unit|gb|api|sms|email))\b/.test(ring)) {
+        if (ctx.billing_type !== 'Unit price' && ctx.billing_type !== 'Tier unit price') score -= 2;
+      }
+      score += candidates.length * 0.05; // slight bias toward later numbers
+      candidates.push({ value: val, score });
     }
   }
-  if (!out.length) return null;
-  // take the last seen (often the row total at end of a line)
-  return out[out.length - 1];
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].value;
 }
 
-// ---- Accept explicit zero (only when clearly indicated) ----
-const ZERO_TERMS_RE = /\b(?:no\s*charge|free|complimentary|waived|included(?:\s+at\s+no\s+extra\s+cost)?|n\/?c|nc|zero)\b/i;
+// ---- Explicit-zero detection (narrowed: no bare "nc", no bare "included") ----
+const ZERO_TERMS_RE = /\b(?:no\s*charge|free|complimentary|waived|included\s+at\s+no\s+extra\s+cost|n\/c|zero)\b/i;
 const ZERO_CURRENCY_RE = /(?:\$|US\$|USD)\s*0(?:\.00)?\b/i;
 
-// Field lists for price lookup
-const PRICE_FIELDS_PRIMARY = [
-  'total_price', 'price', 'amount', 'per_period_price', 'per_period', 'annual_price', 'monthly_price'
-];
-const PRICE_FIELDS_SECONDARY = [
-  'setup_fee','one_time_fee','upfront','down_payment','line_total','subtotal'
-];
+const PRICE_FIELDS_PRIMARY = ['total_price','price','amount','per_period_price','per_period','annual_price','monthly_price'];
+const PRICE_FIELDS_SECONDARY = ['setup_fee','one_time_fee','upfront','down_payment','line_total','subtotal'];
 
 function explicitZeroSignal(obj){
-  // field-level explicit 0 (primary/secondary fields)
   for (const f of [...PRICE_FIELDS_PRIMARY, ...PRICE_FIELDS_SECONDARY]) {
     const v = toNumberLoose(obj?.[f]);
     if (v === 0) return `field:${f}`;
   }
-  // evidence / description / name text signals
   const texts = [];
   if (Array.isArray(obj?.evidence)) for (const ev of obj.evidence) if (ev?.snippet) texts.push(ev.snippet);
   if (obj?.description) texts.push(String(obj.description));
@@ -269,13 +281,15 @@ function priceFromEvidence(obj) {
   if (Array.isArray(obj?.evidence)) for (const ev of obj.evidence) if (ev?.snippet) texts.push(ev.snippet);
   if (obj?.description) texts.push(String(obj.description));
   if (obj?.item_name)   texts.push(String(obj.item_name));
-  return positive(extractPriceFromEvidenceLikeText(texts));
+  const ctx = {
+    frequency_unit: clampEnum(obj?.frequency_unit, FREQ_UNITS, null),
+    billing_type: normalizeBillingType(obj?.billing_type, obj)
+  };
+  return positive(extractPriceFromEvidenceLikeText(texts, ctx));
 }
 function bestPrice(obj, { allowExplicitZero = true } = {}) {
-  // 1) Try to find a positive price
   const pos = priceFromFields(obj) ?? priceFromEvidence(obj);
   if (pos != null) return pos;
-  // 2) If not found, accept 0 only with an explicit zero signal
   if (allowExplicitZero) {
     const zr = explicitZeroSignal(obj);
     if (zr) return 0;
@@ -554,7 +568,8 @@ function deriveMonthsOfService(s) {
     if (unit === 'Day(s)')        return Math.round((every * p) / 30);
     if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
   }
-  if (!unit || unit === 'None') return 0;
+  // One-time / None → default to 1 month
+  if (!unit || unit === 'None') return 1;
   return 0;
 }
 function toGarageRevenueStrict(s) {
@@ -572,7 +587,6 @@ function toGarageRevenueStrict(s) {
   // 4) PRICE (no total_value fallback)
   let finalPrice = positive(pickNumber(s?.total_price, null));
   if (finalPrice == null) {
-    // if normalized total_price is 0 and we have an explicit zero signal, keep 0
     const tp = pickNumber(s?.total_price, null);
     if (tp === 0 && explicitZeroSignal(s)) {
       finalPrice = 0;
@@ -619,6 +633,37 @@ function toGarageRevenueStrict(s) {
 function toGarageAllStrict(schedules) {
   return (schedules || []).map(toGarageRevenueStrict);
 }
+
+/* ------------------- QUALITY RERUN MONKEY-PATCH (max once; your conditions) ------------------- */
+const __origResponsesCreate = client.responses.create.bind(client.responses);
+client.responses.create = async function(args) {
+  // First run
+  const resp1 = await __origResponsesCreate(args);
+  let data1;
+  try { data1 = parseModelJson(resp1); } catch { return resp1; }
+  const norm1 = normalizeSchedules(data1);
+
+  // Rerun only if: (A) any item_name missing/blank OR (B) all total_price === 0
+  const hasMissingName = Array.isArray(norm1) && norm1.some(s => !s?.item_name || !String(s.item_name).trim());
+  const allTotalsZero  = Array.isArray(norm1) && norm1.length > 0 && norm1.every(s => Number(s?.total_price) === 0);
+
+  const shouldRerun = hasMissingName || allTotalsZero;
+  if (!shouldRerun) return resp1;
+
+  // One additional run with a small hint
+  const patched = { ...args };
+  if (Array.isArray(patched.input)) {
+    const idx = patched.input.findIndex(m => m && m.role === 'system');
+    const hint = '\n\nRETRY FOCUS: Ensure every schedule has a non-empty item_name and a non-zero total_price (unless explicitly free/waived). Prefer amounts matching schedule frequency or a clearly labeled line total.';
+    if (idx >= 0) {
+      patched.input[idx] = { ...patched.input[idx], content: String(patched.input[idx].content || '') + hint };
+    } else {
+      patched.input.unshift({ role: 'system', content: hint });
+    }
+  }
+  const resp2 = await __origResponsesCreate(patched);
+  return resp2;
+};
 
 /* ------------------- /api/extract ------------------- */
 app.post('/api/extract', upload.single('file'), async (req, res) => {
@@ -669,7 +714,8 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
     const garage = toGarageAllStrict(norm1);
 
-    if (String(format).toLowerCase() === 'garage-only') {
+    // CHANGE: default to garage-only output; use ?format=full to get debug payload
+    if (String(format || '').toLowerCase() !== 'full') {
       return res.json({ revenue_schedule: garage });
     }
 
@@ -690,7 +736,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
   }
 });
 
-/* ------------------- /api/use-contract-assistant ------------------- */
+/* ------------------- /api/use-contract-assistant (UNCHANGED) ------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
   const { contractID, model = 'o3', forceMulti = 'auto', format, env = 'dev' } = req.query;
   const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
