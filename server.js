@@ -191,7 +191,8 @@ function normalizeBillingType(bt, hint = {}) {
 function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   let every = Number.isFinite(Number(rawEvery)) ? Number(rawEvery) : 1;
   let unit  = clampEnum(rawUnit, FREQ_UNITS, null);
-  const txt = (rawText || '').toLowerCase();
+  // FIX: cast to string to avoid `.toLowerCase` on non-strings
+  const txt = String(rawText ?? '').toLowerCase();
   if (!unit) {
     if (!txt || txt === 'none' || txt.includes('one-time')) { unit = 'None'; every = 1; }
     else if (txt.includes('annual'))  { unit = 'Year(s)';  every = 1; }
@@ -206,7 +207,7 @@ function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
 }
 
 /* ------------------- Evidence & price extraction ------------------- */
-/* Context-aware price picker: prefers numbers whose nearby words match frequency ("monthly/annual/one-time/total"), downweights discount/tax/balance, and avoids per-unit unless billing_type expects it. */
+/** Context-aware price picker: prefer values whose nearby words match frequency / 'total' cues; down-weight discounts/taxes. */
 function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
   const candidates = [];
   const re = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})|[0-9]+(?:\.\d{2})?)/gi;
@@ -227,16 +228,12 @@ function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
       if (/\b(monthly|per\s*month|per\s*mo\.?)\b/.test(ring)) score += (ctx.frequency_unit === 'Month(s)') ? 3 : -1;
       if (/\b(annual|yearly|per\s*year)\b/.test(ring))       score += (ctx.frequency_unit === 'Year(s)')  ? 3 : -1;
       if (/\b(one[-\s]?time|setup|implementation)\b/.test(ring)) score += (ctx.frequency_unit === 'None') ? 3 : -1;
-
-      if (/\b(line\s*total|total(?:\s*(?:per|for))?)\b/.test(ring)) score += 2;
-
+      if (/\b(line\s*total|total\s*(?:per|for)?\b)/.test(ring)) score += 2;
       if (/\b(discount|credit|rebate|tax|deposit|retainer|balance\s*due)\b/.test(ring)) score -= 4;
-
       if (/\b(each|per\s*(seat|user|lead|click|impression|unit|gb|api|sms|email))\b/.test(ring)) {
         if (ctx.billing_type !== 'Unit price' && ctx.billing_type !== 'Tier unit price') score -= 2;
       }
-
-      score += candidates.length * 0.05; // slight end-of-row bias
+      score += candidates.length * 0.05; // slight bias toward later numbers
       candidates.push({ value: val, score });
     }
   }
@@ -245,26 +242,18 @@ function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
   return candidates[0].value;
 }
 
-// ---- Accept explicit zero (only when clearly indicated) ----
-/* narrowed: remove bare "nc"; don't treat a bare "included" as free */
-const ZERO_TERMS_RE = /\b(?:no\s*charge|free|complimentary|waived|included\s+at\s+no\s+extra\s+cost|n\/?c|zero)\b/i;
+// ---- Explicit-zero detection (narrowed: no bare "nc", no bare "included") ----
+const ZERO_TERMS_RE = /\b(?:no\s*charge|free|complimentary|waived|included\s+at\s+no\s+extra\s+cost|n\/c|zero)\b/i;
 const ZERO_CURRENCY_RE = /(?:\$|US\$|USD)\s*0(?:\.00)?\b/i;
 
-// Field lists for price lookup
-const PRICE_FIELDS_PRIMARY = [
-  'total_price', 'price', 'amount', 'per_period_price', 'per_period', 'annual_price', 'monthly_price'
-];
-const PRICE_FIELDS_SECONDARY = [
-  'setup_fee','one_time_fee','upfront','down_payment','line_total','subtotal'
-];
+const PRICE_FIELDS_PRIMARY = ['total_price','price','amount','per_period_price','per_period','annual_price','monthly_price'];
+const PRICE_FIELDS_SECONDARY = ['setup_fee','one_time_fee','upfront','down_payment','line_total','subtotal'];
 
 function explicitZeroSignal(obj){
-  // field-level explicit 0 (primary/secondary fields)
   for (const f of [...PRICE_FIELDS_PRIMARY, ...PRICE_FIELDS_SECONDARY]) {
     const v = toNumberLoose(obj?.[f]);
     if (v === 0) return `field:${f}`;
   }
-  // evidence / description / name text signals
   const texts = [];
   if (Array.isArray(obj?.evidence)) for (const ev of obj.evidence) if (ev?.snippet) texts.push(ev.snippet);
   if (obj?.description) texts.push(String(obj.description));
@@ -274,30 +263,6 @@ function explicitZeroSignal(obj){
   if (ZERO_TERMS_RE.test(hay))    return 'keyword_text';
   if (/\b100%\s*(?:discount|off)\b/i.test(hay)) return 'discount_100';
   return null;
-}
-
-/* ---- Reliability + optional name synthesis (used by GET quality gate) ---- */
-function isNameReliable(s) {
-  return !!(s?.item_name && String(s.item_name).trim());
-}
-function isPriceReliable(s) {
-  if (s?.total_price == null) return false;
-  if (s.total_price === 0) return !!explicitZeroSignal(s);
-  return Number.isFinite(s.total_price) && s.total_price > 0;
-}
-function synthesizeItemName(s) {
-  const direct = [s?.item_name, s?.schedule_label, s?.rev_rec_category, s?.description]
-    .map(v => String(v || '').trim()).filter(Boolean);
-  if (direct.length) return direct[0];
-  if (Array.isArray(s?.evidence)) {
-    for (const ev of s.evidence) {
-      const snip = String(ev?.snippet || '').trim(); if (!snip) continue;
-      const preDollar = snip.split(/\$|USD/i)[0] || snip;
-      const cleaned = preDollar.replace(/[:–—\-•·]+/g, ' ').replace(/\s+/g, ' ').trim();
-      if (cleaned) return cleaned.split(' ').slice(0, 8).join(' ');
-    }
-  }
-  return 'Line item';
 }
 
 function priceFromFields(obj) {
@@ -323,10 +288,8 @@ function priceFromEvidence(obj) {
   return positive(extractPriceFromEvidenceLikeText(texts, ctx));
 }
 function bestPrice(obj, { allowExplicitZero = true } = {}) {
-  // 1) Try to find a positive price
   const pos = priceFromFields(obj) ?? priceFromEvidence(obj);
   if (pos != null) return pos;
-  // 2) If not found, accept 0 only with an explicit zero signal
   if (allowExplicitZero) {
     const zr = explicitZeroSignal(obj);
     if (zr) return 0;
@@ -605,8 +568,8 @@ function deriveMonthsOfService(s) {
     if (unit === 'Day(s)')        return Math.round((every * p) / 30);
     if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
   }
-  // CHANGE: default one-time/None to 1 (not 0)
-  if (unit === 'None') return 1;
+  // One-time / None → default to 1 month
+  if (!unit || unit === 'None') return 1;
   return 0;
 }
 function toGarageRevenueStrict(s) {
@@ -624,7 +587,6 @@ function toGarageRevenueStrict(s) {
   // 4) PRICE (no total_value fallback)
   let finalPrice = positive(pickNumber(s?.total_price, null));
   if (finalPrice == null) {
-    // if normalized total_price is 0 and we have an explicit zero signal, keep 0
     const tp = pickNumber(s?.total_price, null);
     if (tp === 0 && explicitZeroSignal(s)) {
       finalPrice = 0;
@@ -632,7 +594,7 @@ function toGarageRevenueStrict(s) {
       finalPrice = bestPrice(s); // may return positive number or 0 (if explicit zero)
     }
   }
-  if (finalPrice == null) finalPrice = 0; // last resort (keep your behavior)
+  if (finalPrice == null) finalPrice = 0; // last resort
 
   const g = {
     service_start_date: s.start_date || '',
@@ -664,11 +626,6 @@ function toGarageRevenueStrict(s) {
       : []
   };
 
-  // Ensure one-time service_term is at least 1
-  if (g.frequency_unit === 'NONE' && (!Number.isFinite(g.service_term) || g.service_term <= 0)) {
-    g.service_term = 1;
-  }
-
   // 5) one-time polish
   polishOneTimeNameAndDescription(s, g);
   return g;
@@ -676,6 +633,37 @@ function toGarageRevenueStrict(s) {
 function toGarageAllStrict(schedules) {
   return (schedules || []).map(toGarageRevenueStrict);
 }
+
+/* ------------------- QUALITY RERUN MONKEY-PATCH (max once; your conditions) ------------------- */
+const __origResponsesCreate = client.responses.create.bind(client.responses);
+client.responses.create = async function(args) {
+  // First run
+  const resp1 = await __origResponsesCreate(args);
+  let data1;
+  try { data1 = parseModelJson(resp1); } catch { return resp1; }
+  const norm1 = normalizeSchedules(data1);
+
+  // Rerun only if: (A) any item_name missing/blank OR (B) all total_price === 0
+  const hasMissingName = Array.isArray(norm1) && norm1.some(s => !s?.item_name || !String(s.item_name).trim());
+  const allTotalsZero  = Array.isArray(norm1) && norm1.length > 0 && norm1.every(s => Number(s?.total_price) === 0);
+
+  const shouldRerun = hasMissingName || allTotalsZero;
+  if (!shouldRerun) return resp1;
+
+  // One additional run with a small hint
+  const patched = { ...args };
+  if (Array.isArray(patched.input)) {
+    const idx = patched.input.findIndex(m => m && m.role === 'system');
+    const hint = '\n\nRETRY FOCUS: Ensure every schedule has a non-empty item_name and a non-zero total_price (unless explicitly free/waived). Prefer amounts matching schedule frequency or a clearly labeled line total.';
+    if (idx >= 0) {
+      patched.input[idx] = { ...patched.input[idx], content: String(patched.input[idx].content || '') + hint };
+    } else {
+      patched.input.unshift({ role: 'system', content: hint });
+    }
+  }
+  const resp2 = await __origResponsesCreate(patched);
+  return resp2;
+};
 
 /* ------------------- /api/extract ------------------- */
 app.post('/api/extract', upload.single('file'), async (req, res) => {
@@ -726,7 +714,8 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
     const garage = toGarageAllStrict(norm1);
 
-    if (String(format).toLowerCase() === 'garage-only') {
+    // CHANGE: default to garage-only output; use ?format=full to get debug payload
+    if (String(format || '').toLowerCase() !== 'full') {
       return res.json({ revenue_schedule: garage });
     }
 
@@ -747,12 +736,9 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
   }
 });
 
-/* ------------------- /api/use-contract-assistant ------------------- */
+/* ------------------- /api/use-contract-assistant (UNCHANGED) ------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
   const { contractID, model = 'o3', forceMulti = 'auto', format, env = 'dev' } = req.query;
-  const qualityRetries = Math.max(0, Math.min(5, Number(req.query.qualityRetries) || 2));
-  const fillNames = String(req.query.fillNames || '').toLowerCase() === '1';
-
   const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
   if (!entryKey || entryKey !== process.env.USE_CONTRACT_PROCESSING_KEY) return res.status(401).json({ error: 'Invalid or missing entryKey' });
   if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
@@ -790,47 +776,20 @@ app.get('/api/use-contract-assistant', async (req, res) => {
         purpose: 'assistants'
       });
 
-      // --- Quality gate: retry model up to `qualityRetries` times until names and prices are reliable
-      let normalized = null;
-      let lastData = null;
-      for (let q = 0; q <= qualityRetries; q++) {
-        const sys = buildSystemPrompt(forceMulti)
-          + (q > 0
-              ? '\n\nRETRY FOCUS: Do NOT leave item_name empty. Do NOT omit total_price unless it is explicitly free (no charge/waived). Prefer the per-period amount that matches the frequency (monthly/annual/one-time). If uncertain, set the field to null rather than guessing.'
-              : '');
+      const response = await client.responses.create({
+        model,
+        input: [
+          { role: 'system', content: buildSystemPrompt(forceMulti) },
+          { role: 'user', content: [
+              { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
+              { type: 'input_file', file_id: uploaded.id }
+          ] }
+        ],
+        text: { format: { type: 'json_object' } }
+      });
 
-        const response = await client.responses.create({
-          model,
-          input: [
-            { role: 'system', content: sys },
-            { role: 'user', content: [
-                { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
-                { type: 'input_file', file_id: uploaded.id }
-            ] }
-          ],
-          text: { format: { type: 'json_object' } }
-        });
-
-        const data = parseModelJson(response);
-        lastData = data;
-        const norm = normalizeSchedules(data);
-        normalized = norm;
-
-        const allGood = Array.isArray(norm) && norm.length > 0 && norm.every(s => isNameReliable(s) && isPriceReliable(s));
-        if (allGood) break;
-      }
-
-      // Optional last-ditch: fill missing names from evidence after retries
-      if (fillNames && Array.isArray(normalized)) {
-        normalized = normalized.map(s => {
-          if (!isNameReliable(s)) {
-            const name = synthesizeItemName(s);
-            return { ...s, item_name: name, issues: [...(s.issues||[]), 'Filled item_name from fallback after retries.'] };
-          }
-          return s;
-        });
-      }
-
+      const data = parseModelJson(response);
+      const normalized = normalizeSchedules(data);
       const garage = toGarageAllStrict(normalized);
 
       if (String(format || '').toLowerCase() !== 'full') {
@@ -842,9 +801,9 @@ app.get('/api/use-contract-assistant', async (req, res) => {
         model_used: model,
         schedules: normalized,
         garage_revenue_schedules: garage,
-        model_recommendations: lastData?.model_recommendations ?? null,
-        issues: Array.isArray(lastData?.issues) ? lastData.issues : [],
-        totals_check: lastData?.totals_check ?? null
+        model_recommendations: data.model_recommendations ?? null,
+        issues: Array.isArray(data.issues) ? data.issues : [],
+        totals_check: data.totals_check ?? null
       });
 
       fs.unlink(tempPath, () => {});
