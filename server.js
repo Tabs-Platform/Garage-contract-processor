@@ -140,7 +140,6 @@ function toNumberLoose(v) {
   if (v == null) return null;
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   if (typeof v === 'string') {
-    // first numeric group (handles "$1,200.00", "USD 3000", etc.)
     const m = v.match(/-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?/);
     if (!m) return null;
     const n = Number(m[0].replace(/,/g, ''));
@@ -605,7 +604,7 @@ function deriveMonthsOfService(s) {
     if (unit === 'Day(s)')        return Math.round((every * p) / 30);
     if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
   }
-  // CHANGE: default one-time/None to 1 (not 0)
+  // default one-time/None to 1 (not 0)
   if (unit === 'None') return 1;
   return 0;
 }
@@ -760,7 +759,7 @@ app.get('/api/use-contract-assistant', async (req, res) => {
   // Determine API endpoint and key based on env parameter
   const isProd = String(env || '').toLowerCase() === 'prod';
   const apiEndpoint = isProd ? 'https://integrators.prod.api.tabsplatform.com' : 'https://integrators.dev.api.tabsplatform.com';
-  const apiKey = process.env.USE_CONTRACT_PROCESSING_KEY;
+  const apiKey = isProd ? process.env.LUXURY_PRESENCE_TABS_API_KEY : process.env.LUXURY_PRESENCE_TABS_DEV_API_KEY;
 
   let pdfResp;
   try {
@@ -873,9 +872,10 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Garage assistant running on port ${PORT}`);
-});
-
 export default app;
-
+if (!process.env.VERCEL) {
+  const bindHost = process.env.HOST || '0.0.0.0';
+  app.listen(PORT, bindHost, () => {
+    console.log(`Garage assistant running on http://${bindHost}:${PORT}`);
+  });
+}
