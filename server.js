@@ -760,7 +760,7 @@ app.get('/api/use-contract-assistant', async (req, res) => {
   // Determine API endpoint and key based on env parameter
   const isProd = String(env || '').toLowerCase() === 'prod';
   const apiEndpoint = isProd ? 'https://integrators.prod.api.tabsplatform.com' : 'https://integrators.dev.api.tabsplatform.com';
-  const apiKey = isProd ? process.env.LUXURY_PRESENCE_TABS_API_KEY : process.env.LUXURY_PRESENCE_TABS_DEV_API_KEY;
+  const apiKey = process.env.USE_CONTRACT_PROCESSING_KEY;
 
   let pdfResp;
   try {
@@ -873,10 +873,9 @@ app.get('/health', async (_req, res) => {
   }
 });
 
+app.listen(PORT, () => {
+  console.log(`Garage assistant running on port ${PORT}`);
+});
+
 export default app;
-if (!process.env.VERCEL) {
-  const bindHost = process.env.HOST || '0.0.0.0';
-  app.listen(PORT, bindHost, () => {
-    console.log(`Garage assistant running on http://${bindHost}:${PORT}`);
-  });
-}
+
