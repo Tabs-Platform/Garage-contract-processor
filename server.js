@@ -206,25 +206,48 @@ function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
 }
 
 /* ------------------- Evidence & price extraction ------------------- */
-function extractPriceFromEvidenceLikeText(texts) {
-  const out = [];
-  // $, US$, or USD — captures number w/ commas and optional decimals
-  const currencyRe = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+(?:\.[0-9]{2})?)/gi;
-  for (const t of texts) {
-    if (!t) continue;
+/* Context-aware price picker: prefers numbers whose nearby words match frequency ("monthly/annual/one-time/total"), downweights discount/tax/balance, and avoids per-unit unless billing_type expects it. */
+function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
+  const candidates = [];
+  const re = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})|[0-9]+(?:\.\d{2})?)/gi;
+  for (const raw of texts) {
+    if (!raw) continue;
+    const s = String(raw);
     let m;
-    while ((m = currencyRe.exec(String(t)))) {
-      const n = Number(String(m[1]).replace(/,/g, ''));
-      if (Number.isFinite(n) && n > 0) out.push(n);
+    while ((m = re.exec(s))) {
+      const val = Number(m[1].replace(/,/g, ''));
+      if (!Number.isFinite(val) || val <= 0) continue;
+      const start = m.index, end = re.lastIndex;
+      const W = 48;
+      const left  = s.slice(Math.max(0, start - W), start).toLowerCase();
+      const right = s.slice(end, Math.min(s.length, end + W)).toLowerCase();
+      const ring  = left + ' ' + right;
+
+      let score = 0;
+      if (/\b(monthly|per\s*month|per\s*mo\.?)\b/.test(ring)) score += (ctx.frequency_unit === 'Month(s)') ? 3 : -1;
+      if (/\b(annual|yearly|per\s*year)\b/.test(ring))       score += (ctx.frequency_unit === 'Year(s)')  ? 3 : -1;
+      if (/\b(one[-\s]?time|setup|implementation)\b/.test(ring)) score += (ctx.frequency_unit === 'None') ? 3 : -1;
+
+      if (/\b(line\s*total|total(?:\s*(?:per|for))?)\b/.test(ring)) score += 2;
+
+      if (/\b(discount|credit|rebate|tax|deposit|retainer|balance\s*due)\b/.test(ring)) score -= 4;
+
+      if (/\b(each|per\s*(seat|user|lead|click|impression|unit|gb|api|sms|email))\b/.test(ring)) {
+        if (ctx.billing_type !== 'Unit price' && ctx.billing_type !== 'Tier unit price') score -= 2;
+      }
+
+      score += candidates.length * 0.05; // slight end-of-row bias
+      candidates.push({ value: val, score });
     }
   }
-  if (!out.length) return null;
-  // take the last seen (often the row total at end of a line)
-  return out[out.length - 1];
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].value;
 }
 
 // ---- Accept explicit zero (only when clearly indicated) ----
-const ZERO_TERMS_RE = /\b(?:no\s*charge|free|complimentary|waived|included(?:\s+at\s+no\s+extra\s+cost)?|n\/?c|nc|zero)\b/i;
+/* narrowed: remove bare "nc"; don't treat a bare "included" as free */
+const ZERO_TERMS_RE = /\b(?:no\s*charge|free|complimentary|waived|included\s+at\s+no\s+extra\s+cost|n\/?c|zero)\b/i;
 const ZERO_CURRENCY_RE = /(?:\$|US\$|USD)\s*0(?:\.00)?\b/i;
 
 // Field lists for price lookup
@@ -253,6 +276,30 @@ function explicitZeroSignal(obj){
   return null;
 }
 
+/* ---- Reliability + optional name synthesis (used by GET quality gate) ---- */
+function isNameReliable(s) {
+  return !!(s?.item_name && String(s.item_name).trim());
+}
+function isPriceReliable(s) {
+  if (s?.total_price == null) return false;
+  if (s.total_price === 0) return !!explicitZeroSignal(s);
+  return Number.isFinite(s.total_price) && s.total_price > 0;
+}
+function synthesizeItemName(s) {
+  const direct = [s?.item_name, s?.schedule_label, s?.rev_rec_category, s?.description]
+    .map(v => String(v || '').trim()).filter(Boolean);
+  if (direct.length) return direct[0];
+  if (Array.isArray(s?.evidence)) {
+    for (const ev of s.evidence) {
+      const snip = String(ev?.snippet || '').trim(); if (!snip) continue;
+      const preDollar = snip.split(/\$|USD/i)[0] || snip;
+      const cleaned = preDollar.replace(/[:–—\-•·]+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (cleaned) return cleaned.split(' ').slice(0, 8).join(' ');
+    }
+  }
+  return 'Line item';
+}
+
 function priceFromFields(obj) {
   for (const f of PRICE_FIELDS_PRIMARY) {
     const v = positive(pickNumber(obj?.[f], null));
@@ -269,7 +316,11 @@ function priceFromEvidence(obj) {
   if (Array.isArray(obj?.evidence)) for (const ev of obj.evidence) if (ev?.snippet) texts.push(ev.snippet);
   if (obj?.description) texts.push(String(obj.description));
   if (obj?.item_name)   texts.push(String(obj.item_name));
-  return positive(extractPriceFromEvidenceLikeText(texts));
+  const ctx = {
+    frequency_unit: clampEnum(obj?.frequency_unit, FREQ_UNITS, null),
+    billing_type: normalizeBillingType(obj?.billing_type, obj)
+  };
+  return positive(extractPriceFromEvidenceLikeText(texts, ctx));
 }
 function bestPrice(obj, { allowExplicitZero = true } = {}) {
   // 1) Try to find a positive price
@@ -554,7 +605,8 @@ function deriveMonthsOfService(s) {
     if (unit === 'Day(s)')        return Math.round((every * p) / 30);
     if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
   }
-  if (!unit || unit === 'None') return 0;
+  // CHANGE: default one-time/None to 1 (not 0)
+  if (unit === 'None') return 1;
   return 0;
 }
 function toGarageRevenueStrict(s) {
@@ -580,7 +632,7 @@ function toGarageRevenueStrict(s) {
       finalPrice = bestPrice(s); // may return positive number or 0 (if explicit zero)
     }
   }
-  if (finalPrice == null) finalPrice = 0; // last resort
+  if (finalPrice == null) finalPrice = 0; // last resort (keep your behavior)
 
   const g = {
     service_start_date: s.start_date || '',
@@ -611,6 +663,11 @@ function toGarageRevenueStrict(s) {
         }))
       : []
   };
+
+  // Ensure one-time service_term is at least 1
+  if (g.frequency_unit === 'NONE' && (!Number.isFinite(g.service_term) || g.service_term <= 0)) {
+    g.service_term = 1;
+  }
 
   // 5) one-time polish
   polishOneTimeNameAndDescription(s, g);
@@ -693,8 +750,11 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 /* ------------------- /api/use-contract-assistant ------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
   const { contractID, model = 'o3', forceMulti = 'auto', format, env = 'dev' } = req.query;
-  //const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
-  //if (!entryKey || entryKey !== process.env.USE_CONTRACT_PROCESSING_KEY) return res.status(401).json({ error: 'Invalid or missing entryKey' });
+  const qualityRetries = Math.max(0, Math.min(5, Number(req.query.qualityRetries) || 2));
+  const fillNames = String(req.query.fillNames || '').toLowerCase() === '1';
+
+  const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
+  if (!entryKey || entryKey !== process.env.USE_CONTRACT_PROCESSING_KEY) return res.status(401).json({ error: 'Invalid or missing entryKey' });
   if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
 
   // Determine API endpoint and key based on env parameter
@@ -730,20 +790,47 @@ app.get('/api/use-contract-assistant', async (req, res) => {
         purpose: 'assistants'
       });
 
-      const response = await client.responses.create({
-        model,
-        input: [
-          { role: 'system', content: buildSystemPrompt(forceMulti) },
-          { role: 'user', content: [
-              { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
-              { type: 'input_file', file_id: uploaded.id }
-          ] }
-        ],
-        text: { format: { type: 'json_object' } }
-      });
+      // --- Quality gate: retry model up to `qualityRetries` times until names and prices are reliable
+      let normalized = null;
+      let lastData = null;
+      for (let q = 0; q <= qualityRetries; q++) {
+        const sys = buildSystemPrompt(forceMulti)
+          + (q > 0
+              ? '\n\nRETRY FOCUS: Do NOT leave item_name empty. Do NOT omit total_price unless it is explicitly free (no charge/waived). Prefer the per-period amount that matches the frequency (monthly/annual/one-time). If uncertain, set the field to null rather than guessing.'
+              : '');
 
-      const data = parseModelJson(response);
-      const normalized = normalizeSchedules(data);
+        const response = await client.responses.create({
+          model,
+          input: [
+            { role: 'system', content: sys },
+            { role: 'user', content: [
+                { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
+                { type: 'input_file', file_id: uploaded.id }
+            ] }
+          ],
+          text: { format: { type: 'json_object' } }
+        });
+
+        const data = parseModelJson(response);
+        lastData = data;
+        const norm = normalizeSchedules(data);
+        normalized = norm;
+
+        const allGood = Array.isArray(norm) && norm.length > 0 && norm.every(s => isNameReliable(s) && isPriceReliable(s));
+        if (allGood) break;
+      }
+
+      // Optional last-ditch: fill missing names from evidence after retries
+      if (fillNames && Array.isArray(normalized)) {
+        normalized = normalized.map(s => {
+          if (!isNameReliable(s)) {
+            const name = synthesizeItemName(s);
+            return { ...s, item_name: name, issues: [...(s.issues||[]), 'Filled item_name from fallback after retries.'] };
+          }
+          return s;
+        });
+      }
+
       const garage = toGarageAllStrict(normalized);
 
       if (String(format || '').toLowerCase() !== 'full') {
@@ -755,9 +842,9 @@ app.get('/api/use-contract-assistant', async (req, res) => {
         model_used: model,
         schedules: normalized,
         garage_revenue_schedules: garage,
-        model_recommendations: data.model_recommendations ?? null,
-        issues: Array.isArray(data.issues) ? data.issues : [],
-        totals_check: data.totals_check ?? null
+        model_recommendations: lastData?.model_recommendations ?? null,
+        issues: Array.isArray(lastData?.issues) ? lastData.issues : [],
+        totals_check: lastData?.totals_check ?? null
       });
 
       fs.unlink(tempPath, () => {});
