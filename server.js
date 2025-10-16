@@ -530,7 +530,7 @@ function toGarageFrequencyWithMonths(s, months) {
   const unit = s?.frequency_unit;
   const number_of_periods = periodsFromMonths(unit, every, months);
   if (!unit || unit === 'None') {
-    return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
+    return { frequency_unit: 'NONE', period: 1, number_of_periods: 1 };
   }
   if (unit === 'Month(s)') {
     if (every === 3) return { frequency_unit: 'QUARTER', period: 1, number_of_periods };
