@@ -113,9 +113,11 @@ const INTEGRATION_PAIRS = [
   ['Performance SEO Add On', 'Editorial SEO Add On'],
   ['Premium User Seat', 'Premium User Seat'],
 ];
+
 const INTEGRATION_BY_ITEM = new Map(
   INTEGRATION_PAIRS.map(([itemName, integrationId]) => [itemName.toLowerCase().trim(), integrationId])
 );
+
 function canonicalizeName(s) {
   let t = String(s || '').toLowerCase();
   t = t.replace(/&/g, 'and');
@@ -125,14 +127,71 @@ function canonicalizeName(s) {
   t = t.replace(/(\d)\s+(?=\d)/g, '$1');
   return t;
 }
-const CANON_INDEX = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => ({ rawKey: k, canonKey: canonicalizeName(k), val: v }));
+
+/* ---------- Fuzzy matching helpers (robust but conservative) ---------- */
+// Stopwords that don't help identify the product
+const INTEGRATION_STOPWORDS = new Set([
+  'subscription','plan','program','package','activation','setup','set','up',
+  'one','time','fee','fees','user','seat','additional','addon','add','on',
+  'add on','add-on','tool','service','services'
+]);
+// "Flavor" tokens that shouldn't be the only overlap
+const INTEGRATION_FLAVOR = new Set([
+  'pro','premier','premium','plus','base','enterprise','custom','standard','basic','advanced'
+]);
+function canonTokens(canonStr) {
+  return String(canonStr || '')
+    .split(' ')
+    .map(t => t.trim())
+    .filter(t => t && t.length > 1 && !INTEGRATION_STOPWORDS.has(t));
+}
+/* Precompute canonical keys *and* token sets for scoring */
+const CANON_INDEX = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => {
+  const can = canonicalizeName(k);
+  return { rawKey: k, canonKey: can, tokens: canonTokens(can), val: v };
+});
+
 function mapIntegrationItem(itemName) {
   if (!itemName) return null;
-  const exact = INTEGRATION_BY_ITEM.get(String(itemName).toLowerCase().trim());
+  const raw = String(itemName).trim();
+
+  // 1) Exact match (case-insensitive)
+  const exact = INTEGRATION_BY_ITEM.get(raw.toLowerCase());
   if (exact) return exact;
-  const canon = canonicalizeName(itemName);
-  const hit = CANON_INDEX.find(e => e.canonKey === canon);
-  return hit ? hit.val : null;
+
+  // 2) Canonical equality
+  const canonQ = canonicalizeName(raw);
+  const eq = CANON_INDEX.find(e => e.canonKey === canonQ);
+  if (eq) return eq.val;
+
+  // 3) Fuzzy tokens fallback
+  const qTokens = canonTokens(canonQ);
+  if (!qTokens.length) return null;
+  const setQ = new Set(qTokens);
+
+  let best = { val: null, score: 0 };
+
+  for (const e of CANON_INDEX) {
+    if (!e.tokens || !e.tokens.length) continue;
+    const setK = new Set(e.tokens);
+
+    const inter = [...setQ].filter(t => setK.has(t));
+    if (inter.length === 0) continue;
+
+    // Reject matches where the only overlap is flavor (unless 2+ tokens overlap)
+    const hasNonFlavorOverlap = inter.some(t => !INTEGRATION_FLAVOR.has(t));
+    if (inter.length < 2 && !hasNonFlavorOverlap) continue;
+
+    // Weighted score: Jaccard + coverage + small bonus for non-flavor overlap
+    const unionSize = new Set([...setQ, ...setK]).size;
+    const jacc = inter.length / unionSize;
+    const covQ = inter.length / setQ.size;
+    const covK = inter.length / setK.size;
+    const score = jacc + 0.25 * covQ + 0.15 * covK + (hasNonFlavorOverlap ? 0.10 : 0);
+
+    if (score > best.score) best = { val: e.val, score };
+  }
+  return best.score >= 0.55 ? best.val : null; // threshold
 }
 
 /* ------------------- Helpers: numbers, enums, etc. ------------------- */
@@ -191,7 +250,7 @@ function normalizeBillingType(bt, hint = {}) {
 function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   let every = Number.isFinite(Number(rawEvery)) ? Number(rawEvery) : 1;
   let unit  = clampEnum(rawUnit, FREQ_UNITS, null);
-  // FIX: cast to string to avoid `.toLowerCase` on non-strings
+  // Cast to string to avoid `.toLowerCase` on non-strings
   const txt = String(rawText ?? '').toLowerCase();
   if (!unit) {
     if (!txt || txt === 'none' || txt.includes('one-time')) { unit = 'None'; every = 1; }
@@ -207,7 +266,6 @@ function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
 }
 
 /* ------------------- Evidence & price extraction ------------------- */
-/** Context-aware price picker: prefer values whose nearby words match frequency / 'total' cues; down-weight discounts/taxes. */
 function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
   const candidates = [];
   const re = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})|[0-9]+(?:\.\d{2})?)/gi;
@@ -233,7 +291,7 @@ function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
       if (/\b(each|per\s*(seat|user|lead|click|impression|unit|gb|api|sms|email))\b/.test(ring)) {
         if (ctx.billing_type !== 'Unit price' && ctx.billing_type !== 'Tier unit price') score -= 2;
       }
-      score += candidates.length * 0.05; // slight bias toward later numbers
+      score += candidates.length * 0.05;
       candidates.push({ value: val, score });
     }
   }
@@ -242,7 +300,7 @@ function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
   return candidates[0].value;
 }
 
-// ---- Explicit-zero detection (narrowed: no bare "nc", no bare "included") ----
+// Explicit-zero detection
 const ZERO_TERMS_RE = /\b(?:no\s*charge|free|complimentary|waived|included\s+at\s+no\s+extra\s+cost|n\/c|zero)\b/i;
 const ZERO_CURRENCY_RE = /(?:\$|US\$|USD)\s*0(?:\.00)?\b/i;
 
@@ -444,7 +502,7 @@ function normalizeSchedules(data) {
       }
     }
 
-    // --------- PRICE: positive fields → positive evidence → explicit zero
+    // PRICE: positive fields → positive evidence → explicit zero
     const chosen = bestPrice(s) ?? bestPrice(out);
     if (chosen != null) {
       out.total_price = chosen;
@@ -540,7 +598,7 @@ function toGarageFrequencyWithMonths(s, months) {
   if (unit === 'Day(s)')        return { frequency_unit: 'DAYS', period: every, number_of_periods };
   if (unit === 'Semi_month(s)') return { frequency_unit: 'SEMI_MONTH', period: every, number_of_periods };
   if (unit === 'Week(s)')       return { frequency_unit: 'DAYS', period: every*7, number_of_periods };
-  return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
+  return { frequency_unit: 'NONE', period: 1, number_of_periods: 1 };
 }
 function polishOneTimeNameAndDescription(s, g) {
   const text = [s?.schedule_label, s?.item_name, s?.description, s?.rev_rec_category].filter(Boolean).join(' ').toLowerCase();
@@ -550,14 +608,7 @@ function polishOneTimeNameAndDescription(s, g) {
     if (!g.item_description) g.item_description = 'Total one-time fees listed on order form';
   }
 }
-function deriveMonthsOfService(s) {
-  const byDates = monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date);
-  if (Number.isFinite(byDates) && byDates > 0) return byDates;
-  const mosRaw = s?.months_of_service;
-  if (mosRaw !== null && mosRaw !== undefined) {
-    const mosNum = pickNumber(mosRaw, null);
-    if (mosNum != null && mosNum > 0) return mosNum;
-  }
+function monthsFromFrequencyOrDefault(s) {
   const every = pickNumber(s?.frequency_every, 1);
   const unit = s?.frequency_unit;
   const p = pickNumber(s?.periods, null);
@@ -568,9 +619,18 @@ function deriveMonthsOfService(s) {
     if (unit === 'Day(s)')        return Math.round((every * p) / 30);
     if (unit === 'Semi_month(s)') return Math.round((15 * every * p) / 30);
   }
-  // One-time / None → default to 1 month
-  if (!unit || unit === 'None') return 1;
+  if (!unit || unit === 'None') return 1; // default 1 month for one-time
   return 0;
+}
+function deriveMonthsOfService(s) {
+  const byDates = monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date);
+  if (Number.isFinite(byDates) && byDates > 0) return byDates;
+  const mosRaw = s?.months_of_service;
+  if (mosRaw !== null && mosRaw !== undefined) {
+    const mosNum = pickNumber(mosRaw, null);
+    if (mosNum != null && mosNum > 0) return mosNum;
+  }
+  return monthsFromFrequencyOrDefault(s);
 }
 function toGarageRevenueStrict(s) {
   // 1) derive months first (for frequency only)
@@ -643,18 +703,22 @@ client.responses.create = async function(args) {
   try { data1 = parseModelJson(resp1); } catch { return resp1; }
   const norm1 = normalizeSchedules(data1);
 
-  // Rerun only if: (A) any item_name missing/blank OR (B) all total_price === 0
-  const hasMissingName = Array.isArray(norm1) && norm1.some(s => !s?.item_name || !String(s.item_name).trim());
-  const allTotalsZero  = Array.isArray(norm1) && norm1.length > 0 && norm1.every(s => Number(s?.total_price) === 0);
+  // Rerun only if:
+  // (A) any item_name missing/blank
+  // (B) any start_date missing/blank
+  // (C) all total_price === 0
+  const hasMissingName  = Array.isArray(norm1) && norm1.some(s => !s?.item_name || !String(s.item_name).trim());
+  const hasMissingStart = Array.isArray(norm1) && norm1.some(s => !s?.start_date || !String(s.start_date).trim());
+  const allTotalsZero   = Array.isArray(norm1) && norm1.length > 0 && norm1.every(s => Number(s?.total_price) === 0);
 
-  const shouldRerun = hasMissingName || allTotalsZero;
+  const shouldRerun = hasMissingName || hasMissingStart || allTotalsZero;
   if (!shouldRerun) return resp1;
 
-  // One additional run with a small hint
+  // One additional run with a focused hint
   const patched = { ...args };
   if (Array.isArray(patched.input)) {
     const idx = patched.input.findIndex(m => m && m.role === 'system');
-    const hint = '\n\nRETRY FOCUS: Ensure every schedule has a non-empty item_name and a non-zero total_price (unless explicitly free/waived). Prefer amounts matching schedule frequency or a clearly labeled line total.';
+    const hint = '\n\nRETRY FOCUS: Ensure every schedule has a non-empty item_name, a populated start_date, and a non-zero total_price (unless explicitly free/waived). Prefer amounts matching schedule frequency or a clearly labeled line total.';
     if (idx >= 0) {
       patched.input[idx] = { ...patched.input[idx], content: String(patched.input[idx].content || '') + hint };
     } else {
@@ -732,10 +796,10 @@ export async function extractPdfSchedules(filePath, fileName, options = {}) {
 
   const garage = toGarageAllStrict(norm1);
 
-  // Return format based on requested format
-  if (String(format || '').toLowerCase() === 'garage') {
-    return { revenue_schedule: garage };
-  }
+    // Default to garage-only output; use ?format=full to get debug payload
+    if (String(format || '').toLowerCase() !== 'full') {
+      return res.json({ revenue_schedule: garage });
+    }
 
   return {
     model_used: chosenModel,
