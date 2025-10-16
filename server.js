@@ -681,7 +681,7 @@ export async function extractPdfSchedules(filePath, fileName, options = {}) {
   const {
     model = 'o3',
     forceMulti = 'auto',
-    runs = 2,
+    runs = 1,
     format = 'garage'
   } = options;
 
@@ -753,7 +753,7 @@ export async function extractPdfSchedules(filePath, fileName, options = {}) {
 app.post('/api/extract', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
-    const { model = 'o3', forceMulti = 'auto', runs = '2', format } = req.query;
+    const { model = 'o3', forceMulti = 'auto', runs = '1', format } = req.query;
     
     const result = await extractPdfSchedules(req.file.path, req.file.originalname, {
       model,
