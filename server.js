@@ -796,10 +796,10 @@ export async function extractPdfSchedules(filePath, fileName, options = {}) {
 
   const garage = toGarageAllStrict(norm1);
 
-    // Default to garage-only output; use ?format=full to get debug payload
-    if (String(format || '').toLowerCase() !== 'full') {
-      return res.json({ revenue_schedule: garage });
-    }
+  // Return format based on requested format
+  if (String(format || '').toLowerCase() === 'garage') {
+    return { revenue_schedule: garage };
+  }
 
   return {
     model_used: chosenModel,
@@ -878,7 +878,9 @@ app.get('/api/use-contract-assistant', async (req, res) => {
       });
 
       fs.unlink(tempPath, () => {});
-      return res.json(result);
+      console.log('result', result);
+      res.json(result);
+      return; // Success, exit the retry loop
     } catch (err) {
       lastError = err;
       console.error(`use-contract-assistant error (attempt ${attempt}/${maxRetries}):`, err);
