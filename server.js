@@ -191,7 +191,7 @@ function normalizeBillingType(bt, hint = {}) {
 function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
   let every = Number.isFinite(Number(rawEvery)) ? Number(rawEvery) : 1;
   let unit  = clampEnum(rawUnit, FREQ_UNITS, null);
-  // FIX: cast to string to avoid `.toLowerCase` on non-strings
+  // Cast to string to avoid `.toLowerCase` on non-strings
   const txt = String(rawText ?? '').toLowerCase();
   if (!unit) {
     if (!txt || txt === 'none' || txt.includes('one-time')) { unit = 'None'; every = 1; }
@@ -530,7 +530,8 @@ function toGarageFrequencyWithMonths(s, months) {
   const unit = s?.frequency_unit;
   const number_of_periods = periodsFromMonths(unit, every, months);
   if (!unit || unit === 'None') {
-    return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
+    // One-time/NONE must emit at least one period for downstream systems.
+    return { frequency_unit: 'NONE', period: 1, number_of_periods: 1 };
   }
   if (unit === 'Month(s)') {
     if (every === 3) return { frequency_unit: 'QUARTER', period: 1, number_of_periods };
@@ -540,7 +541,7 @@ function toGarageFrequencyWithMonths(s, months) {
   if (unit === 'Day(s)')        return { frequency_unit: 'DAYS', period: every, number_of_periods };
   if (unit === 'Semi_month(s)') return { frequency_unit: 'SEMI_MONTH', period: every, number_of_periods };
   if (unit === 'Week(s)')       return { frequency_unit: 'DAYS', period: every*7, number_of_periods };
-  return { frequency_unit: 'NONE', period: 1, number_of_periods: 0 };
+  return { frequency_unit: 'NONE', period: 1, number_of_periods: 1 };
 }
 function polishOneTimeNameAndDescription(s, g) {
   const text = [s?.schedule_label, s?.item_name, s?.description, s?.rev_rec_category].filter(Boolean).join(' ').toLowerCase();
@@ -714,7 +715,7 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 
     const garage = toGarageAllStrict(norm1);
 
-    // CHANGE: default to garage-only output; use ?format=full to get debug payload
+    // Default to garage-only output; use ?format=full to get debug payload
     if (String(format || '').toLowerCase() !== 'full') {
       return res.json({ revenue_schedule: garage });
     }
