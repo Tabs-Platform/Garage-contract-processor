@@ -27,14 +27,14 @@ const FREQ_UNITS   = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year
 
 /* ----------------------- ITEM NAME → INTEGRATION ITEM ---------------------- */
 const INTEGRATION_PAIRS = [
-  ['Ad Spend ($500)', 'Ad Spend'],
-  ['Ad Spend ($1,000)', 'Ad Spend'],
+  ['Ad Spend ($500)', 'Ad Spend ($500)'],
+  ['Ad Spend ($1,000)', 'Ad Spend ($1,000)'],
   ['Ad Spend Add On', 'Ad Spend Add On'],
-  ['Presence Platform User Seat', 'Additional User Seat'],
+  ['Presence Platform User Seat', 'Presence Platform User Seat'],
   ['Additional Website Page', 'Additional Website Page'],
   ['Agent Bio', 'Agent Bio'],
   ['Agent Landing Pages', 'Agent Landing Pages'],
-  ['Standard User Seat', 'Agent Subdomains'],
+  ['Standard User Seat', 'Standard User Seat'],
   ['AI Advertising Specialist', 'AI Advertising Specialist'],
   ['AI Blog Specialist', 'AI Blog Specialist'],
   ['AI Lead Nurture', 'AI Lead Nurture'],
@@ -47,12 +47,12 @@ const INTEGRATION_PAIRS = [
   ['Brand', 'Brand'],
   ['Brand+', 'Brand+'],
   ['Collective by Luxury Presence', 'Collective by Luxury Presence'],
-  ['Branded Mobile App User Seat', 'Copilot (White-Label) Additional Agent Seat'],
-  ['Branded Mobile App Activation', 'Copilot Activation (White-Label)'],
-  ['Luxury Presence Mobile App User Seat', 'Copilot Agent Seat'],
-  ['Branded Mobile App Subscription', 'Copilot Subscription (White-Label)'],
-  ['Design Change (Pro)', 'Design Change (within Pro)'],
-  ['Design Change (Custom)', 'Design Change to Custom'],
+  ['Branded Mobile App User Seat', 'Branded Mobile App User Seat'],
+  ['Branded Mobile App Activation', 'Branded Mobile App Activation'],
+  ['Luxury Presence Mobile App User Seat', 'Luxury Presence Mobile App User Seat'],
+  ['Branded Mobile App Subscription', 'Branded Mobile App Subscription'],
+  ['Design Change (Pro)', 'Design Change (Pro)'],
+  ['Design Change (Custom)', 'Design Change (Custom)'],
   ['Design Refresh', 'Design Refresh'],
   ['Dev Hours', 'Dev Hours'],
   ['Development Website (Monthly)', 'Development Website (Monthly)'],
@@ -69,29 +69,29 @@ const INTEGRATION_PAIRS = [
   ['Lead Gen Ads (Premier)', 'Lead Gen Ads (Premier)'],
   ['Leads Premier', 'Leads Premier'],
   ['Leads Pro', 'Leads Pro'],
-  ['Press Migration', 'N/A (did not exist previously)'],
-  ['Neighborhood Migration', 'N/A (did not exist previously)'],
-  ['Development Migration', 'N/A (did not exist previously)'],
-  ['Testimonial Migration', 'N/A (did not exist previously)'],
+  ['Press Migration', 'Press Migration'],
+  ['Neighborhood Migration', 'Neighborhood Migration'],
+  ['Development Migration', 'Development Migration'],
+  ['Testimonial Migration', 'Testimonial Migration'],
   ['Neighborhood Copy', 'Neighborhood Copy'],
   ['Neighborhood Guide', 'Neighborhood Guide'],
   ['One-Click Property Websites', 'One-Click Property Websites'],
-  ['One-Time Setup Fee (All In Premier Custom)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (All In Premier)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Brand+ & Custom)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Brand+ & Pro)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Launch+ & Custom)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Launch+ & Pro)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Leads Premier Custom)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Leads Premier)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Leads Pro & Custom)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Leads Pro & Pro)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Presence Premier Custom)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (Presence Premier)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (SEO Premier Custom)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (SEO Premier)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (SEO Pro & Custom)', 'One-Time Setup Fee'],
-  ['One-Time Setup Fee (SEO Pro & Pro)', 'One-Time Setup Fee'],
+  ['One-Time Setup Fee (All In Premier Custom)', 'One-Time Setup Fee (All In Premier Custom)'],
+  ['One-Time Setup Fee (All In Premier)', 'One-Time Setup Fee (All In Premier)'],
+  ['One-Time Setup Fee (Brand+ & Custom)', 'One-Time Setup Fee (Brand+ & Custom)'],
+  ['One-Time Setup Fee (Brand+ & Pro)', 'One-Time Setup Fee (Brand+ & Pro)'],
+  ['One-Time Setup Fee (Launch+ & Custom)', 'One-Time Setup Fee (Launch+ & Custom)'],
+  ['One-Time Setup Fee (Launch+ & Pro)', 'One-Time Setup Fee (Launch+ & Pro)'],
+  ['One-Time Setup Fee (Leads Premier Custom)', 'One-Time Setup Fee (Leads Premier Custom)'],
+  ['One-Time Setup Fee (Leads Premier)', 'One-Time Setup Fee (Leads Premier)'],
+  ['One-Time Setup Fee (Leads Pro & Custom)', 'One-Time Setup Fee (Leads Pro & Custom)'],
+  ['One-Time Setup Fee (Leads Pro & Pro)', 'One-Time Setup Fee (Leads Pro & Pro)'],
+  ['One-Time Setup Fee (Presence Premier Custom)', 'One-Time Setup Fee (Presence Premier Custom)'],
+  ['One-Time Setup Fee (Presence Premier)', 'One-Time Setup Fee (Presence Premier)'],
+  ['One-Time Setup Fee (SEO Premier Custom)', 'One-Time Setup Fee (SEO Premier Custom)'],
+  ['One-Time Setup Fee (SEO Premier)', 'One-Time Setup Fee (SEO Premier)'],
+  ['One-Time Setup Fee (SEO Pro & Custom)', 'One-Time Setup Fee (SEO Pro & Custom)'],
+  ['One-Time Setup Fee (SEO Pro & Pro)', 'One-Time Setup Fee (SEO Pro & Pro)'],
   ['Opening Video', 'Opening Video'],
   ['Pages of Copywriting', 'Pages of Copywriting'],
   ['Premium Support', 'Premium Support'],
@@ -100,7 +100,7 @@ const INTEGRATION_PAIRS = [
   ['Property Migration', 'Property Migration'],
   ['Remove LP Link in Footer', 'Remove LP Link in Footer'],
   ['Self-Serve Property Website (Monthly)', 'Self-Serve Property Website (Monthly)'],
-  ['One-Time Setup Fee (Self-Serve Property Website)', 'Self-Serve Property Website (One-Time Setup Fee)'],
+  ['One-Time Setup Fee (Self-Serve Property Website)', 'One-Time Setup Fee (Self-Serve Property Website)'],
   ['SEO Blog Post', 'SEO Blog Post'],
   ['SEO Migration', 'SEO Migration'],
   ['SEO Premier', 'SEO Premier'],
@@ -110,8 +110,8 @@ const INTEGRATION_PAIRS = [
   ['Video Editing', 'Video Editing'],
   ['12 Blogs per Quarter', '12 Blogs per Quarter'],
   ['6 Blogs per Quarter', '6 Blogs per Quarter'],
-  ['Performance SEO Add On', 'Editorial SEO Add On'],
-  ['Premium User Seat', 'Premium User Seat'],
+  ['Performance SEO Add On', 'Performance SEO Add On'],
+  ['Premium User Seat', 'Premium User Seat']
 ];
 
 const INTEGRATION_BY_ITEM = new Map(
@@ -588,7 +588,6 @@ function toGarageFrequencyWithMonths(s, months) {
   const unit = s?.frequency_unit;
   const number_of_periods = periodsFromMonths(unit, every, months);
   if (!unit || unit === 'None') {
-    // One-time/NONE must emit at least one period for downstream systems.
     return { frequency_unit: 'NONE', period: 1, number_of_periods: 1 };
   }
   if (unit === 'Month(s)') {
@@ -730,20 +729,54 @@ client.responses.create = async function(args) {
   return resp2;
 };
 
-/* ------------------- /api/extract ------------------- */
-app.post('/api/extract', upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  try {
-    const { model = 'o3', forceMulti = 'auto', runs = '2', format } = req.query;
-    const chosenModel = ['o3','o4-mini','gpt-4o-mini','o3-mini'].includes(model) ? model : 'o3';
-    const agreementRuns = Math.max(1, Math.min(5, Number(runs) || 1));
+/* ------------------- PDF Processing Helper Function ------------------- */
+/**
+ * Extracts revenue schedules from a PDF contract using AI
+ * @param {string} filePath - Path to the PDF file
+ * @param {string} fileName - Name of the file (for OpenAI)
+ * @param {Object} options - Processing options
+ * @param {string} options.model - AI model ('o3', 'o4-mini', 'gpt-4o-mini', 'o3-mini')
+ * @param {string} options.forceMulti - Multi-schedule detection ('auto', 'on', 'off')
+ * @param {number} options.runs - Number of agreement runs (1-5)
+ * @param {string} options.format - Output format ('garage' or 'full')
+ * @returns {Object} Extracted revenue schedules in requested format
+ */
+export async function extractPdfSchedules(filePath, fileName, options = {}) {
+  const {
+    model = 'o3',
+    forceMulti = 'auto',
+    runs = 1,
+    format = 'garage'
+  } = options;
 
-    const uploaded = await client.files.create({
-      file: await toFile(fs.createReadStream(req.file.path), req.file.originalname || 'contract.pdf'),
-      purpose: 'assistants'
-    });
+  const chosenModel = ['o3','o4-mini','gpt-4o-mini','o3-mini'].includes(model) ? model : 'o3';
+  const agreementRuns = Math.max(1, Math.min(5, Number(runs) || 1));
 
-    const response1 = await client.responses.create({
+  // Upload file to OpenAI
+  const uploaded = await client.files.create({
+    file: await toFile(fs.createReadStream(filePath), fileName || 'contract.pdf'),
+    purpose: 'assistants'
+  });
+
+  // First extraction run
+  const response1 = await client.responses.create({
+    model: chosenModel,
+    input: [
+      { role: 'system', content: buildSystemPrompt(forceMulti) },
+      { role: 'user',   content: [
+          { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
+          { type: 'input_file', file_id: uploaded.id }
+      ] }
+    ],
+    text: { format: { type: 'json_object' } }
+  });
+  const data1 = parseModelJson(response1);
+  const norm1 = normalizeSchedules(data1);
+
+  // Agreement checking (if multiple runs requested)
+  let agreement = null;
+  if (agreementRuns >= 2) {
+    const response2 = await client.responses.create({
       model: chosenModel,
       input: [
         { role: 'system', content: buildSystemPrompt(forceMulti) },
@@ -754,46 +787,46 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
       ],
       text: { format: { type: 'json_object' } }
     });
-    const data1 = parseModelJson(response1);
-    const norm1 = normalizeSchedules(data1);
+    const data2 = parseModelJson(response2);
+    const norm2 = normalizeSchedules(data2);
+    const agr = computeAgreement(norm1, norm2);
+    agr.enriched.forEach((extra, idx) => Object.assign(norm1[idx], extra));
+    agreement = agr.summary;
+  }
 
-    let agreement = null;
-    if (agreementRuns >= 2) {
-      const response2 = await client.responses.create({
-        model: chosenModel,
-        input: [
-          { role: 'system', content: buildSystemPrompt(forceMulti) },
-          { role: 'user',   content: [
-              { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
-              { type: 'input_file', file_id: uploaded.id }
-          ] }
-        ],
-        text: { format: { type: 'json_object' } }
-      });
-      const data2 = parseModelJson(response2);
-      const norm2 = normalizeSchedules(data2);
-      const agr = computeAgreement(norm1, norm2);
-      agr.enriched.forEach((extra, idx) => Object.assign(norm1[idx], extra));
-      agreement = agr.summary;
-    }
+  const garage = toGarageAllStrict(norm1);
 
-    const garage = toGarageAllStrict(norm1);
+  // Return format based on requested format
+  if (String(format || '').toLowerCase() === 'garage') {
+    return { revenue_schedule: garage };
+  }
 
-    // Default to garage-only output; use ?format=full to get debug payload
-    if (String(format || '').toLowerCase() !== 'full') {
-      return res.json({ revenue_schedule: garage });
-    }
+  return {
+    model_used: chosenModel,
+    runs: agreementRuns,
+    schedules: norm1,
+    garage_revenue_schedules: garage,
+    model_recommendations: data1.model_recommendations ?? null,
+    issues: Array.isArray(data1.issues) ? data1.issues : [],
+    totals_check: data1.totals_check ?? null,
+    agreement_summary: agreement ?? null
+  };
+}
 
-    res.json({
-      model_used: chosenModel,
-      runs: agreementRuns,
-      schedules: norm1,
-      garage_revenue_schedules: garage,
-      model_recommendations: data1.model_recommendations ?? null,
-      issues: Array.isArray(data1.issues) ? data1.issues : [],
-      totals_check: data1.totals_check ?? null,
-      agreement_summary: agreement ?? null
+/* ------------------- /api/extract ------------------- */
+app.post('/api/extract', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const { model = 'o3', forceMulti = 'auto', runs = '1', format } = req.query;
+    
+    const result = await extractPdfSchedules(req.file.path, req.file.originalname, {
+      model,
+      forceMulti,
+      runs,
+      format
     });
+
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: 'Extraction failed', debug: { message: err?.message } });
   } finally {
@@ -804,15 +837,16 @@ app.post('/api/extract', upload.single('file'), async (req, res) => {
 /* ------------------- /api/use-contract-assistant (UNCHANGED) ------------------- */
 app.get('/api/use-contract-assistant', async (req, res) => {
   const { contractID, model = 'o3', forceMulti = 'auto', format, env = 'dev' } = req.query;
-  const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
-  if (!entryKey || entryKey !== process.env.USE_CONTRACT_PROCESSING_KEY) return res.status(401).json({ error: 'Invalid or missing entryKey' });
+  //const entryKey = req.headers['entrykey'] || req.headers['entryKey'];
+  //if (!entryKey || entryKey !== process.env.USE_CONTRACT_PROCESSING_KEY) return res.status(401).json({ error: 'Invalid or missing entryKey' });
   if (!contractID) return res.status(400).json({ error: 'Missing contractID' });
 
   // Determine API endpoint and key based on env parameter
   const isProd = String(env || '').toLowerCase() === 'prod';
   const apiEndpoint = isProd ? 'https://integrators.prod.api.tabsplatform.com' : 'https://integrators.dev.api.tabsplatform.com';
-  const apiKey = isProd ? process.env.LUXURY_PRESENCE_TABS_API_KEY : process.env.LUXURY_PRESENCE_TABS_DEV_API_KEY;
-
+  const apiKey = isProd ? process.env.USE_CONTRACT_PROCESSING_KEY : process.env.USE_CONTRACT_PROCESSING_KEY;
+  console.log('apiEndpoint', apiEndpoint);
+  console.log('apiKey', apiKey);
   let pdfResp;
   try {
     pdfResp = await fetch(`${apiEndpoint}/v3/contracts/${contractID}/file`, {
@@ -836,42 +870,16 @@ app.get('/api/use-contract-assistant', async (req, res) => {
       const tempPath = `/tmp/${contractID}.pdf`;
       await fs.promises.writeFile(tempPath, pdfBuffer);
 
-      const uploaded = await client.files.create({
-        file: await toFile(fs.createReadStream(tempPath), `${contractID}.pdf`),
-        purpose: 'assistants'
-      });
-
-      const response = await client.responses.create({
+      const result = await extractPdfSchedules(tempPath, `${contractID}.pdf`, {
         model,
-        input: [
-          { role: 'system', content: buildSystemPrompt(forceMulti) },
-          { role: 'user', content: [
-              { type: 'input_text', text: 'Extract Garage-ready revenue schedules as a single JSON object.' },
-              { type: 'input_file', file_id: uploaded.id }
-          ] }
-        ],
-        text: { format: { type: 'json_object' } }
-      });
-
-      const data = parseModelJson(response);
-      const normalized = normalizeSchedules(data);
-      const garage = toGarageAllStrict(normalized);
-
-      if (String(format || '').toLowerCase() !== 'full') {
-        fs.unlink(tempPath, () => {});
-        return res.json({ revenue_schedule: garage });
-      }
-
-      res.json({
-        model_used: model,
-        schedules: normalized,
-        garage_revenue_schedules: garage,
-        model_recommendations: data.model_recommendations ?? null,
-        issues: Array.isArray(data.issues) ? data.issues : [],
-        totals_check: data.totals_check ?? null
+        forceMulti,
+        runs: 1, // Single run for this endpoint
+        format
       });
 
       fs.unlink(tempPath, () => {});
+      console.log('result', result);
+      res.json(result);
       return; // Success, exit the retry loop
     } catch (err) {
       lastError = err;
