@@ -34,7 +34,7 @@ const INTEGRATION_PAIRS = [
   ['Additional Website Page', 'Additional Website Page'],
   ['Agent Bio', 'Agent Bio'],
   ['Agent Landing Pages', 'Agent Landing Pages'],
-  ['Standard User Seat', 'Standard User Seat'],
+  ['Agent Subdomains', 'Agent Subdomains'],
   ['AI Advertising Specialist', 'AI Advertising Specialist'],
   ['AI Blog Specialist', 'AI Blog Specialist'],
   ['AI Lead Nurture', 'AI Lead Nurture'],
@@ -584,6 +584,10 @@ function toGarageBillingType(bt) {
   return map[bt] || 'FLAT_PRICE';
 }
 function toGarageFrequencyWithMonths(s, months) {
+  // Hard business rule: monthly → exactly 12 periods, period size = 1 month
+  if (s?.frequency_unit === 'Month(s)') {
+    return { frequency_unit: 'MONTH', period: 1, number_of_periods: 12 };
+  }
   const every = pickNumber(s?.frequency_every, 1);
   const unit = s?.frequency_unit;
   const number_of_periods = periodsFromMonths(unit, every, months);
@@ -634,7 +638,8 @@ function deriveMonthsOfService(s) {
 }
 function toGarageRevenueStrict(s) {
   // 1) derive months first (for frequency only)
-  const service_term = deriveMonthsOfService(s) || 0;
+  let service_term = deriveMonthsOfService(s) || 0;
+  if (s?.frequency_unit === 'Month(s)') service_term = 12;
 
   // 2) compute frequency fields
   const freq = toGarageFrequencyWithMonths(s, service_term);
