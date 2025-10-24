@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Garage Contract Processor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 2rem;
+      max-width: 1200px;
+      margin: 0 auto;
+      background: #f5f5f5;
+    }
+    h1 { margin-bottom: 0.5rem; color: #111; }
+    .subtitle { color: #666; margin-bottom: 2rem; }
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    label { display: block; margin-bottom: 0.5rem; font-weight: 600; color: #333; }
+    input[type="file"], select {
+      width: 100%;
+      padding: 0.75rem;
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      font-size: 1rem;
+    }
+    button {
+      background: #0066cc;
+      color: white;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover { background: #0052a3; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    #status {
+      margin-top: 1rem;
+      padding: 1rem;
+      border-radius: 8px;
+      display: none;
+    }
+    #status.loading { background: #e3f2fd; color: #1976d2; display: block; }
+    #status.error { background: #ffebee; color: #c62828; display: block; }
+    #status.success { background: #e8f5e9; color: #2e7d32; display: block; }
+    #results {
+      margin-top: 2rem;
+    }
+    .schedule-card {
+      background: white;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      border-left: 4px solid #0066cc;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    .schedule-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+    .schedule-title { font-size: 1.25rem; font-weight: 700; color: #111; }
+    .confidence {
+      padding: 0.25rem 0.75rem;
+      border-radius: 999px;
+      font-size: 0.875rem;
+      font-weight: 600;
+    }
+    .confidence.high { background: #e8f5e9; color: #2e7d32; }
+    .confidence.medium { background: #fff3e0; color: #e65100; }
+    .confidence.low { background: #ffebee; color: #c62828; }
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .field {
+      padding: 0.75rem;
+      background: #f9f9f9;
+      border-radius: 8px;
+    }
+    .field-label {
+      font-size: 0.75rem;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 0.25rem;
+    }
+    .field-value {
+      font-size: 1rem;
+      color: #111;
+      font-weight: 600;
+    }
+    .copy-btn {
+      background: #f5f5f5;
+      color: #333;
+      margin-top: 1rem;
+    }
+    .copy-btn:hover { background: #e0e0e0; }
+    pre {
+      background: #f5f5f5;
+      padding: 1rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.875rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Garage Contract Processor</h1>
+  <p class="subtitle">Upload a PDF contract to extract revenue schedules</p>
+
+  <div class="card">
+    <form id="uploadForm">
+      <label for="file">Select PDF Contract</label>
+      <input type="file" id="file" accept="application/pdf" required>
+
+      <label for="model">Model</label>
+      <select id="model">
+        <option value="o3" selected>o3 (best reasoning)</option>
+        <option value="o4-mini">o4-mini (fast reasoning)</option>
+        <option value="gpt-4o-mini">gpt-4o-mini (economy)</option>
+        <option value="o3-mini">o3-mini</option>
+      </select>
+
+      <label for="forceMulti">Multi-schedule Detection</label>
+      <select id="forceMulti">
+        <option value="auto" selected>Auto (LLM decides)</option>
+        <option value="on">On (always search for multiple)</option>
+        <option value="off">Off (single only)</option>
+      </select>
+
+      <label for="runs">Agreement Runs</label>
+      <select id="runs">
+        <option value="2" selected>2 runs (agreement check)</option>
+        <option value="1">1 run (faster)</option>
+        <option value="3">3 runs (highest confidence)</option>
+      </select>
+
+      <button type="submit" id="submitBtn">Analyze Contract</button>
+    </form>
+
+    <div id="status"></div>
+  </div>
+
+  <div id="results"></div>
+
+  <script>
+    const form = document.getElementById('uploadForm');
+    const status = document.getElementById('status');
+    const results = document.getElementById('results');
+    const submitBtn = document.getElementById('submitBtn');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const file = document.getElementById('file').files[0];
+      if (!file) return;
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const params = new URLSearchParams({
+        model: document.getElementById('model').value,
+        forceMulti: document.getElementById('forceMulti').value,
+        runs: document.getElementById('runs').value
+      });
+
+      status.className = 'loading';
+      status.textContent = 'Uploading and analyzing... This may take 30-60 seconds.';
+      submitBtn.disabled = true;
+      results.innerHTML = '';
+
+      try {
+        const res = await fetch(`/api/extract?${params}`, {
+          method: 'POST',
+          body: formData
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.debug?.message || data.error || 'Request failed');
+        }
+
+        status.className = 'success';
+        const flagged = (data.schedules || []).filter(s => s.flag_for_review).length;
+        const avg = data.agreement_summary?.avg_confidence 
+          ? Math.round(data.agreement_summary.avg_confidence * 100) + '%' 
+          : '—';
+        status.textContent = `✓ Found ${data.schedules.length} schedule(s) • Avg confidence: ${avg} • Flagged: ${flagged}`;
+
+        renderResults(data);
+      } catch (error) {
+        status.className = 'error';
+        status.textContent = '✗ ' + error.message;
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+
+    function renderResults(data) {
+      if (!data.schedules || data.schedules.length === 0) {
+        results.innerHTML = '<div class="card">No schedules found.</div>';
+        return;
+      }
+
+      data.schedules.forEach((schedule, index) => {
+        const conf = schedule.confidence || 0;
+        const confClass = conf >= 0.9 ? 'high' : conf >= 0.75 ? 'medium' : 'low';
+        const confLabel = conf >= 0.9 ? 'High' : conf >= 0.75 ? 'Medium' : 'Low';
+
+        const card = document.createElement('div');
+        card.className = 'schedule-card';
+        card.innerHTML = `
+          <div class="schedule-header">
+            <div class="schedule-title">Schedule ${index + 1}: ${schedule.item_name || 'Unnamed'}</div>
+            <div class="confidence ${confClass}">${confLabel} (${Math.round(conf * 100)}%)</div>
+          </div>
+
+          <div class="field-grid">
+            <div class="field">
+              <div class="field-label">Billing Type</div>
+              <div class="field-value">${schedule.billing_type || '—'}</div>
+            </div>
+            <div class="field">
+              <div class="field-label">Total Price</div>
+              <div class="field-value">$${(schedule.total_price || 0).toLocaleString()}</div>
+            </div>
+            <div class="field">
+              <div class="field-label">Start Date</div>
+              <div class="field-value">${schedule.start_date || '—'}</div>
+            </div>
+            <div class="field">
+              <div class="field-label">Frequency</div>
+              <div class="field-value">${schedule.frequency_unit || 'None'}</div>
+            </div>
+            <div class="field">
+              <div class="field-label">Service Term</div>
+              <div class="field-value">${schedule.service_term || 0} months</div>
+            </div>
+            <div class="field">
+              <div class="field-label">Quantity</div>
+              <div class="field-value">${schedule.quantity || 1}</div>
+            </div>
+          </div>
+
+          ${schedule.description ? `<p style="margin-top: 1rem; color: #666;">${schedule.description}</p>` : ''}
+          
+          <button class="copy-btn" onclick='copySchedule(${JSON.stringify(schedule)})'>
+            Copy as JSON
+          </button>
+        `;
+
+        results.appendChild(card);
+      });
+
+      // Add bulk copy button
+      const bulkCard = document.createElement('div');
+      bulkCard.className = 'card';
+      bulkCard.innerHTML = `
+        <button onclick='copyAll(${JSON.stringify(data.schedules)})'>
+          Copy All Schedules as JSON Array
+        </button>
+      `;
+      results.appendChild(bulkCard);
+    }
+
+    window.copySchedule = (schedule) => {
+      navigator.clipboard.writeText(JSON.stringify(schedule, null, 2))
+        .then(() => alert('✓ Copied to clipboard!'))
+        .catch(() => alert('✗ Failed to copy'));
+    };
+
+    window.copyAll = (schedules) => {
+      navigator.clipboard.writeText(JSON.stringify(schedules, null, 2))
+        .then(() => alert('✓ Copied all schedules to clipboard!'))
+        .catch(() => alert('✗ Failed to copy'));
+    };
+  </script>
+</body>
+</html>
+
+
