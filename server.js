@@ -29,7 +29,7 @@ const FREQ_UNITS   = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year
 // Configuration for integration API
 const INTEGRATION_API_CONFIG = {
   merchantId: process.env.LUXURY_PRESENCE_MERCHANT_ID || '2c1b04e0-e947-483f-8fc5-582fb079cf69',
-  apiKey: process.env.TABS_API_KEY || 'tabs_sk_Ghz68mziVpiSQQ3goIfw7Ml8hmxPu8krwm6xzuZroPVG39uDNNyFuqk0cXypps4E',
+  apiKey: process.env.USE_CONTRACT_PROCESSING_KEY,
   apiEndpoint: process.env.TABS_API_ENDPOINT || 'https://integrators.prod.api.tabsplatform.com',
   refreshInterval: 3600000 // 1 hour in milliseconds
 };
@@ -194,6 +194,8 @@ const INTEGRATION_STOPWORDS = new Set([
   'one','time','fee','fees','user','seat','additional','addon','add','on',
   'add on','add-on','tool','service','services'
 ]);
+// keep your existing INTEGRATION_STOPWORDS = new Set([...]) line
+['subscription','setup','activation'].forEach(w => INTEGRATION_STOPWORDS.delete(w));
 // "Flavor" tokens that shouldn't be the only overlap
 const INTEGRATION_FLAVOR = new Set([
   'pro','premier','premium','plus','base','enterprise','custom','standard','basic','advanced'
@@ -223,35 +225,51 @@ function rebuildCanonIndex() {
 function mapIntegrationItem(itemName) {
   if (!itemName) return null;
   const raw = String(itemName).trim();
+  const rawLower = raw.toLowerCase();
+
+  // Minimal “type” signals pulled only from the item name (no schedule ctx needed)
+  const qLooksSub  = /\b(subscription|recurring|monthly|per\s*month)\b/.test(rawLower);
+  const qLooksOT   = /\b(one[-\s]?time|setup|activation)\b/.test(rawLower);
 
   // 1) Exact match (case-insensitive)
-  const exact = INTEGRATION_BY_ITEM.get(raw.toLowerCase());
+  const exact = INTEGRATION_BY_ITEM.get(rawLower);
   if (exact) return exact;
 
-  // 2) Canonical equality
+  // 2) Canonical equality — but skip type-mismatched candidates
   const canonQ = canonicalizeName(raw);
-  const eq = CANON_INDEX.find(e => e.canonKey === canonQ);
+  const eq = CANON_INDEX.find(e => {
+    if (e.canonKey !== canonQ) return false;
+    const cand = e.rawKey.toLowerCase();
+    const candOT  = /\b(one[-\s]?time|setup|activation)\b/.test(cand);
+    const candSub = /\b(subscription|monthly|per\s*month|annual|per\s*year)\b/.test(cand);
+    if (qLooksSub && candOT) return false;        // don't map subscription → setup
+    if (qLooksOT && candSub) return false;        // don't map setup → subscription
+    return true;
+  });
   if (eq) return eq.val;
 
-  // 3) Fuzzy tokens fallback
+  // 3) Fuzzy tokens — same scoring as before, with the same simple type gate
   const qTokens = canonTokens(canonQ);
   if (!qTokens.length) return null;
-  const setQ = new Set(qTokens);
 
   let best = { val: null, score: 0 };
-
+  const setQ = new Set(qTokens);
   for (const e of CANON_INDEX) {
+    const cand = e.rawKey.toLowerCase();
+    const candOT  = /\b(one[-\s]?time|setup|activation)\b/.test(cand);
+    const candSub = /\b(subscription|monthly|per\s*month|annual|per\s*year)\b/.test(cand);
+    if (qLooksSub && candOT) continue;            // skip obvious mismatch
+    if (qLooksOT && candSub) continue;
+
     if (!e.tokens || !e.tokens.length) continue;
     const setK = new Set(e.tokens);
-
     const inter = [...setQ].filter(t => setK.has(t));
     if (inter.length === 0) continue;
 
-    // Reject matches where the only overlap is flavor (unless 2+ tokens overlap)
+    // Keep your conservative flavor filter
     const hasNonFlavorOverlap = inter.some(t => !INTEGRATION_FLAVOR.has(t));
-    if (inter.length < 2) continue;
+    if (inter.length < 2 && !hasNonFlavorOverlap) continue;
 
-    // Weighted score: Jaccard + coverage + small bonus for non-flavor overlap
     const unionSize = new Set([...setQ, ...setK]).size;
     const jacc = inter.length / unionSize;
     const covQ = inter.length / setQ.size;
@@ -260,8 +278,9 @@ function mapIntegrationItem(itemName) {
 
     if (score > best.score) best = { val: e.val, score };
   }
-  return best.score >= 0.55 ? best.val : null; // threshold
+  return best.score >= 0.55 ? best.val : null;
 }
+
 
 /* ------------------- Helpers: numbers, enums, etc. ------------------- */
 function toNumberLoose(v) {
