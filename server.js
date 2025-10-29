@@ -25,8 +25,17 @@ app.use(express.json({ limit: '5mb' }));
 const BILLING_TYPES = ['Flat price','Unit price','Tier flat price','Tier unit price'];
 const FREQ_UNITS   = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year(s)'];
 
-/* ----------------------- ITEM NAME → INTEGRATION ITEM ---------------------- */
-const INTEGRATION_PAIRS = [
+/* ----------------------- ITEM NAME → INTEGRATION ITEM (Dynamic from API) ---------------------- */
+// Configuration for integration API
+const INTEGRATION_API_CONFIG = {
+  merchantId: process.env.LUXURY_PRESENCE_MERCHANT_ID || '2c1b04e0-e947-483f-8fc5-582fb079cf69',
+  apiKey: process.env.TABS_API_KEY || 'tabs_sk_Ghz68mziVpiSQQ3goIfw7Ml8hmxPu8krwm6xzuZroPVG39uDNNyFuqk0cXypps4E',
+  apiEndpoint: process.env.TABS_API_ENDPOINT || 'https://integrators.prod.api.tabsplatform.com',
+  refreshInterval: 3600000 // 1 hour in milliseconds
+};
+
+// Fallback mappings in case API is unavailable
+const FALLBACK_INTEGRATION_PAIRS = [
   ['Ad Spend ($500)', 'Ad Spend ($500)'],
   ['Ad Spend ($1,000)', 'Ad Spend ($1,000)'],
   ['Ad Spend Add On', 'Ad Spend Add On'],
@@ -34,7 +43,8 @@ const INTEGRATION_PAIRS = [
   ['Additional Website Page', 'Additional Website Page'],
   ['Agent Bio', 'Agent Bio'],
   ['Agent Landing Pages', 'Agent Landing Pages'],
-  ['Agent Subdomains', 'Agent Subdomains'],
+  ['Agent Subdomains', 'Standard User Seat'],
+  ['Standard User Seat', 'Standard User Seat'],
   ['AI Advertising Specialist', 'AI Advertising Specialist'],
   ['AI Blog Specialist', 'AI Blog Specialist'],
   ['AI Lead Nurture', 'AI Lead Nurture'],
@@ -114,9 +124,58 @@ const INTEGRATION_PAIRS = [
   ['Premium User Seat', 'Premium User Seat']
 ];
 
-const INTEGRATION_BY_ITEM = new Map(
-  INTEGRATION_PAIRS.map(([itemName, integrationId]) => [itemName.toLowerCase().trim(), integrationId])
+// Dynamic integration mappings (loaded from API)
+let INTEGRATION_BY_ITEM = new Map(
+  FALLBACK_INTEGRATION_PAIRS.map(([itemName, integrationId]) => [itemName.toLowerCase().trim(), integrationId])
 );
+
+/**
+ * Fetches integration item mappings from Tabs Platform API
+ */
+async function fetchIntegrationMappings() {
+  try {
+    const url = `${INTEGRATION_API_CONFIG.apiEndpoint}/v16/secrets/merchant/bulk-integration-item-mapping?merchantId=${INTEGRATION_API_CONFIG.merchantId}`;
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': INTEGRATION_API_CONFIG.apiKey,
+        'Accept': 'application/json'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`API responded with status ${response.status}`);
+    }
+    
+    const data = await response.json();
+    const mappings = data?.integrationItemMappings || [];
+    
+    if (mappings.length === 0) {
+      console.warn('⚠️  No integration mappings returned from API, using fallback');
+      return;
+    }
+    
+    // Update the INTEGRATION_BY_ITEM map with fresh data
+    const newMap = new Map();
+    mappings.forEach(({ contractItemResponse, tabsIntegrationItem }) => {
+      if (contractItemResponse && tabsIntegrationItem) {
+        newMap.set(contractItemResponse.toLowerCase().trim(), tabsIntegrationItem);
+      }
+    });
+    
+    INTEGRATION_BY_ITEM = newMap;
+    rebuildCanonIndex(); // Rebuild the canonical index with new mappings
+    console.log(`✅ Loaded ${INTEGRATION_BY_ITEM.size} integration mappings from API`);
+  } catch (error) {
+    console.error('❌ Failed to fetch integration mappings:', error.message);
+    console.log('📌 Using fallback integration mappings');
+  }
+}
+
+// Load integration mappings on startup
+fetchIntegrationMappings();
+
+// Refresh integration mappings periodically
+setInterval(fetchIntegrationMappings, INTEGRATION_API_CONFIG.refreshInterval);
 
 function canonicalizeName(s) {
   let t = String(s || '').toLowerCase();
@@ -146,10 +205,20 @@ function canonTokens(canonStr) {
     .filter(t => t && t.length > 1 && !INTEGRATION_STOPWORDS.has(t));
 }
 /* Precompute canonical keys *and* token sets for scoring */
-const CANON_INDEX = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => {
+let CANON_INDEX = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => {
   const can = canonicalizeName(k);
   return { rawKey: k, canonKey: can, tokens: canonTokens(can), val: v };
 });
+
+/**
+ * Rebuilds the CANON_INDEX from current INTEGRATION_BY_ITEM map
+ */
+function rebuildCanonIndex() {
+  CANON_INDEX = Array.from(INTEGRATION_BY_ITEM.entries()).map(([k, v]) => {
+    const can = canonicalizeName(k);
+    return { rawKey: k, canonKey: can, tokens: canonTokens(can), val: v };
+  });
+}
 
 function mapIntegrationItem(itemName) {
   if (!itemName) return null;
@@ -180,7 +249,7 @@ function mapIntegrationItem(itemName) {
 
     // Reject matches where the only overlap is flavor (unless 2+ tokens overlap)
     const hasNonFlavorOverlap = inter.some(t => !INTEGRATION_FLAVOR.has(t));
-    if (inter.length < 2 && !hasNonFlavorOverlap) continue;
+    if (inter.length < 2) continue;
 
     // Weighted score: Jaccard + coverage + small bonus for non-flavor overlap
     const unionSize = new Set([...setQ, ...setK]).size;
@@ -269,6 +338,12 @@ function normalizeFrequency(rawText, rawEvery, rawUnit, fallback = 'None') {
 function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
   const candidates = [];
   const re = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})|[0-9]+(?:\.\d{2})?)/gi;
+
+  const monthlyCue = /\b(monthly|per\s*month|per\s*mo\.?|\/mo\b)\b/;
+  const annualCue  = /\b(annual|yearly|per\s*year|\/yr\b)\b/;
+  const totalCue   = /\b(line\s*total|total(?:\s*for|\s*due|\s*amount)?|subtotal|contract\s*total)\b/;
+  const oneTimeCue = /\b(one[-\s]?time|setup|implementation)\b/;
+
   for (const raw of texts) {
     if (!raw) continue;
     const s = String(raw);
@@ -276,22 +351,35 @@ function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
     while ((m = re.exec(s))) {
       const val = Number(m[1].replace(/,/g, ''));
       if (!Number.isFinite(val) || val <= 0) continue;
+
       const start = m.index, end = re.lastIndex;
-      const W = 48;
+      const W = 60;
       const left  = s.slice(Math.max(0, start - W), start).toLowerCase();
       const right = s.slice(end, Math.min(s.length, end + W)).toLowerCase();
       const ring  = left + ' ' + right;
 
       let score = 0;
-      if (/\b(monthly|per\s*month|per\s*mo\.?)\b/.test(ring)) score += (ctx.frequency_unit === 'Month(s)') ? 3 : -1;
-      if (/\b(annual|yearly|per\s*year)\b/.test(ring))       score += (ctx.frequency_unit === 'Year(s)')  ? 3 : -1;
-      if (/\b(one[-\s]?time|setup|implementation)\b/.test(ring)) score += (ctx.frequency_unit === 'None') ? 3 : -1;
-      if (/\b(line\s*total|total\s*(?:per|for)?\b)/.test(ring)) score += 2;
-      if (/\b(discount|credit|rebate|tax|deposit|retainer|balance\s*due)\b/.test(ring)) score -= 4;
-      if (/\b(each|per\s*(seat|user|lead|click|impression|unit|gb|api|sms|email))\b/.test(ring)) {
-        if (ctx.billing_type !== 'Unit price' && ctx.billing_type !== 'Tier unit price') score -= 2;
+
+      const hasMonthly = monthlyCue.test(ring);
+      const hasAnnual  = annualCue.test(ring);
+      const hasTotal   = totalCue.test(ring);
+      const hasOT      = oneTimeCue.test(ring);
+
+      // Prefer alignment with requested cadence
+      if (hasMonthly) score += (ctx.frequency_unit === 'Month(s)') ? 4 : -1;
+      if (hasAnnual)  score += (ctx.frequency_unit === 'Year(s)')  ? 4 : -1;
+      if (hasOT)      score += (ctx.frequency_unit === 'None')     ? 3 : -1;
+
+      // Totals: only good for one-time; bad for recurring
+      if (hasTotal)   score += ctx.prefer_line_total ? 2 : -2;
+
+      // Mild nudge for being a line total only when we are not monthly/annual
+      if (!hasMonthly && !hasAnnual && !hasOT && hasTotal && ctx.frequency_unit && ctx.frequency_unit !== 'None') {
+        score -= 1.5;
       }
-      score += candidates.length * 0.05;
+
+      // Keep a weak increasing tie-breaker to stabilize choices
+      score += candidates.length * 0.03;
       candidates.push({ value: val, score });
     }
   }
@@ -299,6 +387,7 @@ function extractPriceFromEvidenceLikeText(texts, ctx = {}) {
   candidates.sort((a, b) => b.score - a.score);
   return candidates[0].value;
 }
+
 
 // Explicit-zero detection
 const ZERO_TERMS_RE = /\b(?:no\s*charge|free|complimentary|waived|included\s+at\s+no\s+extra\s+cost|n\/c|zero)\b/i;
@@ -323,37 +412,53 @@ function explicitZeroSignal(obj){
   return null;
 }
 
-function priceFromFields(obj) {
-  for (const f of PRICE_FIELDS_PRIMARY) {
-    const v = positive(pickNumber(obj?.[f], null));
-    if (v != null) return v;
-  }
-  for (const f of PRICE_FIELDS_SECONDARY) {
+function priceFromFields(obj, { preferMonthly = false, preferAnnual = false } = {}) {
+  const candidates = [];
+
+  // Build dynamic field order based on cadence preference
+  const monthlyOrder = ['monthly_price','per_period_price','per_period','price','amount','annual_price','total_price'];
+  const annualOrder  = ['annual_price','per_period_price','per_period','price','amount','monthly_price','total_price'];
+  const defaultOrder = ['price','amount','per_period_price','per_period','monthly_price','annual_price','total_price'];
+
+  const order = preferMonthly ? monthlyOrder : (preferAnnual ? annualOrder : defaultOrder);
+
+  for (const f of order) {
     const v = positive(pickNumber(obj?.[f], null));
     if (v != null) return v;
   }
   return null;
 }
+
 function priceFromEvidence(obj) {
   const texts = [];
   if (Array.isArray(obj?.evidence)) for (const ev of obj.evidence) if (ev?.snippet) texts.push(ev.snippet);
   if (obj?.description) texts.push(String(obj.description));
   if (obj?.item_name)   texts.push(String(obj.item_name));
+  const freqUnit = clampEnum(obj?.frequency_unit, FREQ_UNITS, null);
   const ctx = {
-    frequency_unit: clampEnum(obj?.frequency_unit, FREQ_UNITS, null),
-    billing_type: normalizeBillingType(obj?.billing_type, obj)
+    frequency_unit: freqUnit,
+    billing_type: normalizeBillingType(obj?.billing_type, obj),
+    // We only "prefer line total" when it's truly one-time
+    prefer_line_total: freqUnit === 'None'
   };
   return positive(extractPriceFromEvidenceLikeText(texts, ctx));
 }
+
 function bestPrice(obj, { allowExplicitZero = true } = {}) {
-  const pos = priceFromFields(obj) ?? priceFromEvidence(obj);
+  const unit = clampEnum(obj?.frequency_unit, FREQ_UNITS, null);
+  const preferMonthly = unit === 'Month(s)';
+  const preferAnnual  = unit === 'Year(s)';
+
+  const pos = priceFromFields(obj, { preferMonthly, preferAnnual }) ?? priceFromEvidence(obj);
   if (pos != null) return pos;
+
   if (allowExplicitZero) {
     const zr = explicitZeroSignal(obj);
     if (zr) return 0;
   }
   return null;
 }
+
 
 /* ------------------- Prompt ------------------- */
 function buildSystemPrompt(forceMulti = 'auto') {
@@ -391,7 +496,8 @@ Rules:
 - For one-time Flat price, default quantity=1 unless the contract explicitly says otherwise.
 - If Unit or Tier, include event_to_track, unit_label, and price_per_unit or tiers[].
 - Include page+snippet evidence for every extracted price/date line.
-- If uncertain about a field, set it to null and add an issue.`;
+- If uncertain about a field, set it to null and add an issue.
+- For recurring schedules, set total_price to the **per-period** amount (e.g., monthly price for MONTH), not the contract total. If both are present, choose the per-period value.`;
 }
 
 /* ------------------- Parse model JSON ------------------- */
@@ -427,7 +533,6 @@ function periodsFromMonths(unit, every, months) {
   return 1;
 }
 
-/* ------------------- Normalize schedules (NO total_value) ------------------- */
 function normalizeSchedules(data) {
   const schedules = Array.isArray(data?.schedules) ? data.schedules : [];
   return schedules.map((s) => {
@@ -438,6 +543,11 @@ function normalizeSchedules(data) {
 
     let qty = pickNumber(s.quantity, null);
     if (bt === 'Flat price') qty = 1;
+
+    // Prefer explicitly provided end-date / calc end-date / auto-renewal date
+    const autoRenewDate = (typeof s?.auto_renewal_date === 'string' && s.auto_renewal_date) 
+                       || (typeof s?.renewal_date === 'string' && s.renewal_date)
+                       || null;
 
     const out = {
       schedule_label: s.schedule_label ?? null,
@@ -453,9 +563,13 @@ function normalizeSchedules(data) {
 
       months_of_service: pickNumber(s.months_of_service, null),
       periods: pickNumber(s.periods, 1),
-      calculated_end_date: s.calculated_end_date || s.end_date || null,
+      calculated_end_date: s.calculated_end_date || s.end_date || autoRenewDate || null,
+      auto_renewal_date: autoRenewDate, // retain for downstream term calcs
       net_terms: pickNumber(s.net_terms, 0),
       rev_rec_category: s.rev_rec_category ?? null,
+
+      // pass-through for rerun fallback (set only after second pass)
+      fallback_min_monthly_periods: pickNumber(s.fallback_min_monthly_periods, null),
 
       event_to_track: s.event_to_track ?? null,
       unit_label: s.unit_label ?? null,
@@ -474,7 +588,7 @@ function normalizeSchedules(data) {
       issues
     };
 
-    // Brand/policy enforcement
+    // Brand/policy enforcement (unchanged)
     if (isLuxuryPresenceHint(s)) {
       out.billing_type = 'Flat price';
       out.quantity = 1;
@@ -502,7 +616,7 @@ function normalizeSchedules(data) {
       }
     }
 
-    // PRICE: positive fields → positive evidence → explicit zero
+    // PRICE resolution (unchanged)
     const chosen = bestPrice(s) ?? bestPrice(out);
     if (chosen != null) {
       out.total_price = chosen;
@@ -584,13 +698,20 @@ function toGarageBillingType(bt) {
   return map[bt] || 'FLAT_PRICE';
 }
 function toGarageFrequencyWithMonths(s, months) {
-  // Hard business rule: monthly → exactly 12 periods, period size = 1 month
-  if (s?.frequency_unit === 'Month(s)') {
-    return { frequency_unit: 'MONTH', period: 1, number_of_periods: 12 };
-  }
   const every = pickNumber(s?.frequency_every, 1);
   const unit = s?.frequency_unit;
-  const number_of_periods = periodsFromMonths(unit, every, months);
+
+  // Base periods from months of service
+  let number_of_periods = periodsFromMonths(unit, every, months);
+
+  // Optional safety floor: only for 1-month cadence, and only if explicitly requested
+  const minMonthly = pickNumber(s?.fallback_min_monthly_periods, null);
+  if (unit === 'Month(s)' && every === 1 && Number.isFinite(minMonthly) && minMonthly > 0) {
+    if (number_of_periods > 0 && number_of_periods < minMonthly) {
+      number_of_periods = minMonthly;
+    }
+  }
+
   if (!unit || unit === 'None') {
     return { frequency_unit: 'NONE', period: 1, number_of_periods: 1 };
   }
@@ -598,10 +719,10 @@ function toGarageFrequencyWithMonths(s, months) {
     if (every === 3) return { frequency_unit: 'QUARTER', period: 1, number_of_periods };
     return { frequency_unit: 'MONTH', period: every, number_of_periods };
   }
-  if (unit === 'Year(s)')       return { frequency_unit: 'YEAR', period: every, number_of_periods };
-  if (unit === 'Day(s)')        return { frequency_unit: 'DAYS', period: every, number_of_periods };
+  if (unit === 'Year(s)')       return { frequency_unit: 'YEAR',       period: every, number_of_periods };
+  if (unit === 'Day(s)')        return { frequency_unit: 'DAYS',       period: every, number_of_periods };
   if (unit === 'Semi_month(s)') return { frequency_unit: 'SEMI_MONTH', period: every, number_of_periods };
-  if (unit === 'Week(s)')       return { frequency_unit: 'DAYS', period: every*7, number_of_periods };
+  if (unit === 'Week(s)')       return { frequency_unit: 'DAYS',       period: every * 7, number_of_periods };
   return { frequency_unit: 'NONE', period: 1, number_of_periods: 1 };
 }
 function polishOneTimeNameAndDescription(s, g) {
@@ -627,8 +748,13 @@ function monthsFromFrequencyOrDefault(s) {
   return 0;
 }
 function deriveMonthsOfService(s) {
-  const byDates = monthsFromDates(s?.start_date, s?.calculated_end_date || s?.end_date);
+  // Prefer explicit end/calc end/auto-renewal
+  const byDates = monthsFromDates(
+    s?.start_date,
+    s?.calculated_end_date || s?.end_date || s?.auto_renewal_date
+  );
   if (Number.isFinite(byDates) && byDates > 0) return byDates;
+
   const mosRaw = s?.months_of_service;
   if (mosRaw !== null && mosRaw !== undefined) {
     const mosNum = pickNumber(mosRaw, null);
@@ -636,10 +762,66 @@ function deriveMonthsOfService(s) {
   }
   return monthsFromFrequencyOrDefault(s);
 }
+function gatherEvidenceTexts(s) {
+  const arr = [];
+  if (Array.isArray(s?.evidence)) {
+    for (const ev of s.evidence) if (ev?.snippet) arr.push(String(ev.snippet));
+  }
+  if (s?.description) arr.push(String(s.description));
+  if (s?.item_name)   arr.push(String(s.item_name));
+  return arr;
+}
+function findMonthlyPriceCandidate(texts) {
+  if (!texts || !texts.length) return null;
+  const re = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})|[0-9]+(?:\.\d{2})?)/gi;
+  const monthlyCue = /\b(monthly|per\s*month|per\s*mo\.?|\/mo\b)\b/;
+  let best = { val: null, score: -1 };
+  for (const raw of texts) {
+    const s = String(raw);
+    let m;
+    while ((m = re.exec(s))) {
+      const val = Number(m[1].replace(/,/g, ''));
+      if (!Number.isFinite(val) || val <= 0) continue;
+      const start = m.index, end = re.lastIndex;
+      const W = 60;
+      const ring = (s.slice(Math.max(0, start - W), Math.min(s.length, end + W))).toLowerCase();
+      if (monthlyCue.test(ring)) {
+        // stronger score if 'per month' variants occur multiple times nearby
+        const hits = (ring.match(monthlyCue) || []).length;
+        const score = 3 + hits;
+        if (score > best.score) best = { val, score };
+      }
+    }
+  }
+  return best.val;
+}
+function amountLooksLikeTermTotal(texts, amount) {
+  if (!Number.isFinite(amount) || !texts || !texts.length) return false;
+  const re = /(?:\$|US\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})|[0-9]+(?:\.\d{2})?)/gi;
+  const totalCue = /\b(line\s*total|total(?:\s*for|\s*due|\s*amount)?|subtotal|contract\s*total|total\s*for\s*\d+\s*(?:months|mo|years|yrs))\b/;
+  for (const raw of texts) {
+    const s = String(raw);
+    let m;
+    while ((m = re.exec(s))) {
+      const val = Number(m[1].replace(/,/g, ''));
+      if (!Number.isFinite(val)) continue;
+      if (Math.abs(val - amount) < 0.005) {
+        const start = m.index, end = re.lastIndex;
+        const W = 80;
+        const ring = (s.slice(Math.max(0, start - W), Math.min(s.length, end + W))).toLowerCase();
+        if (totalCue.test(ring)) return true;
+      }
+    }
+  }
+  return false;
+}
+function roundToCents(x) {
+  return Math.round(Number(x) * 100) / 100;
+}
+
 function toGarageRevenueStrict(s) {
   // 1) derive months first (for frequency only)
   let service_term = deriveMonthsOfService(s) || 0;
-  if (s?.frequency_unit === 'Month(s)') service_term = 12;
 
   // 2) compute frequency fields
   const freq = toGarageFrequencyWithMonths(s, service_term);
@@ -660,6 +842,20 @@ function toGarageRevenueStrict(s) {
     }
   }
   if (finalPrice == null) finalPrice = 0; // last resort
+
+  // 4b) ENFORCE PER-PERIOD for MONTHLY (period=1)
+  if (freq.frequency_unit === 'MONTH' && freq.period === 1 && freq.number_of_periods > 0) {
+    const texts = gatherEvidenceTexts(s);
+    const perMonthFromEvidence = findMonthlyPriceCandidate(texts);
+    if (Number.isFinite(perMonthFromEvidence) && perMonthFromEvidence > 0) {
+      finalPrice = perMonthFromEvidence;
+    } else {
+      // If the chosen amount is explicitly marked as TOTAL in evidence, convert to per-month
+      if (amountLooksLikeTermTotal(texts, finalPrice)) {
+        finalPrice = roundToCents(finalPrice / Math.max(1, freq.number_of_periods));
+      }
+    }
+  }
 
   const g = {
     service_start_date: s.start_date || '',
@@ -693,14 +889,44 @@ function toGarageRevenueStrict(s) {
 
   // 5) one-time polish
   polishOneTimeNameAndDescription(s, g);
+
+  // 6) 55-day shift (unchanged)
+  const SETUP_FEE_ITEMS_WITH_DELAY = new Set([
+    'One-Time Setup Fee (All In Premier Custom)',
+    'One-Time Setup Fee (All In Premier)',
+    'One-Time Setup Fee (Brand+ & Custom)',
+    'One-Time Setup Fee (Brand+ & Pro)',
+    'One-Time Setup Fee (Launch+ & Custom)',
+    'One-Time Setup Fee (Launch+ & Pro)',
+    'One-Time Setup Fee (Leads Premier Custom)',
+    'One-Time Setup Fee (Leads Premier)',
+    'One-Time Setup Fee (Leads Pro & Custom)',
+    'One-Time Setup Fee (Leads Pro & Pro)',
+    'One-Time Setup Fee (Presence Premier Custom)',
+    'One-Time Setup Fee (Presence Premier)',
+    'One-Time Setup Fee (SEO Premier Custom)',
+    'One-Time Setup Fee (SEO Premier)',
+    'One-Time Setup Fee (SEO Pro & Custom)',
+    'One-Time Setup Fee (SEO Pro & Pro)'
+  ]);
+  if (integration_item && SETUP_FEE_ITEMS_WITH_DELAY.has(integration_item)) {
+    const originalDate = new Date(g.start_date);
+    if (!isNaN(originalDate)) {
+      const adjustedDate = new Date(originalDate);
+      adjustedDate.setDate(adjustedDate.getDate() + 55);
+      const formattedDate = adjustedDate.toISOString().split('T')[0];
+      g.start_date = formattedDate;
+      g.service_start_date = formattedDate;
+    }
+  }
   return g;
 }
 function toGarageAllStrict(schedules) {
   return (schedules || []).map(toGarageRevenueStrict);
 }
-
 /* ------------------- QUALITY RERUN MONKEY-PATCH (max once; your conditions) ------------------- */
 const __origResponsesCreate = client.responses.create.bind(client.responses);
+
 client.responses.create = async function(args) {
   // First run
   const resp1 = await __origResponsesCreate(args);
@@ -708,29 +934,90 @@ client.responses.create = async function(args) {
   try { data1 = parseModelJson(resp1); } catch { return resp1; }
   const norm1 = normalizeSchedules(data1);
 
-  // Rerun only if:
-  // (A) any item_name missing/blank
-  // (B) any start_date missing/blank
-  // (C) all total_price === 0
+  // Base checks
   const hasMissingName  = Array.isArray(norm1) && norm1.some(s => !s?.item_name || !String(s.item_name).trim());
   const hasMissingStart = Array.isArray(norm1) && norm1.some(s => !s?.start_date || !String(s.start_date).trim());
   const allTotalsZero   = Array.isArray(norm1) && norm1.length > 0 && norm1.every(s => Number(s?.total_price) === 0);
 
-  const shouldRerun = hasMissingName || hasMissingStart || allTotalsZero;
+  // Helper: derived monthly periods (only for monthly every=1)
+  function derivedMonthlyPeriods(s) {
+    const unit = s?.frequency_unit;
+    const every = pickNumber(s?.frequency_every, 1);
+    if (unit !== 'Month(s)' || every !== 1) return null;
+
+    const endPref = s?.calculated_end_date || s?.end_date || s?.auto_renewal_date || s?.renewal_date || null;
+    let months = monthsFromDates(s?.start_date, endPref);
+    if (!Number.isFinite(months) || months <= 0) {
+      const mos = pickNumber(s?.months_of_service, null);
+      if (mos != null && mos > 0) months = mos;
+      else {
+        const p = pickNumber(s?.periods, null);
+        if (p != null && p > 0) months = p * 1; // monthly every=1
+        else return null;
+      }
+    }
+    return periodsFromMonths('Month(s)', 1, months);
+  }
+
+  const monthlyTooShort1 = Array.isArray(norm1) && norm1.some(s => {
+    const n = derivedMonthlyPeriods(s);
+    return n != null && n < 6;
+  });
+
+  const shouldRerun = hasMissingName || hasMissingStart || allTotalsZero || monthlyTooShort1;
   if (!shouldRerun) return resp1;
 
-  // One additional run with a focused hint
+  // Second run with focused hint
   const patched = { ...args };
   if (Array.isArray(patched.input)) {
     const idx = patched.input.findIndex(m => m && m.role === 'system');
-    const hint = '\n\nRETRY FOCUS: Ensure every schedule has a non-empty item_name, a populated start_date, and a non-zero total_price (unless explicitly free/waived). Prefer amounts matching schedule frequency or a clearly labeled line total.';
+    const hint =
+      '\n\nRETRY FOCUS: Ensure every schedule has a non-empty item_name, a populated start_date, and a non-zero total_price (unless explicitly free/waived). ' +
+      'When frequency is MONTHLY (every=1), compute number_of_periods from start_date to the TERM END or AUTO-RENEWAL date (e.g., 2025-01-01 → 2027-01-01 ⇒ 24 monthly periods). ' +
+      'Populate calculated_end_date with the end date you used. Do not assume 12.';
     if (idx >= 0) {
       patched.input[idx] = { ...patched.input[idx], content: String(patched.input[idx].content || '') + hint };
     } else {
       patched.input.unshift({ role: 'system', content: hint });
     }
   }
+
   const resp2 = await __origResponsesCreate(patched);
+
+  // If monthly < 6 still persists, enforce a safe default (12) by passing a fallback hint into the JSON.
+  try {
+    const data2 = parseModelJson(resp2);
+    const norm2 = normalizeSchedules(data2);
+
+    const shortIndexes = [];
+    norm2.forEach((s, idx) => {
+      const n = derivedMonthlyPeriods(s);
+      if (n != null && n < 6) shortIndexes.push(idx);
+    });
+
+    if (shortIndexes.length) {
+      const patched2 = { ...data2 };
+      patched2.schedules = Array.isArray(data2.schedules)
+        ? data2.schedules.map((s, idx) => {
+            if (shortIndexes.includes(idx)) {
+              const next = { ...s, fallback_min_monthly_periods: 12 };
+              if (Array.isArray(next.issues)) {
+                next.issues.push('Fallback: monthly periods < 6 after second pass; default min monthly periods = 12.');
+              } else {
+                next.issues = ['Fallback: monthly periods < 6 after second pass; default min monthly periods = 12.'];
+              }
+              return next;
+            }
+            return s;
+          })
+        : data2.schedules;
+      // Write back for downstream parse
+      resp2.output_text = JSON.stringify(patched2);
+    }
+  } catch {
+    // if anything goes wrong here, just return the second response as-is
+  }
+
   return resp2;
 };
 
