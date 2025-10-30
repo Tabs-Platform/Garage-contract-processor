@@ -7,7 +7,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import 'dotenv/config';
 import fetch from 'node-fetch';
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -28,106 +27,14 @@ const FREQ_UNITS   = ['None','Day(s)','Week(s)','Semi_month(s)','Month(s)','Year
 /* ----------------------- ITEM NAME → INTEGRATION ITEM (Dynamic from API) ---------------------- */
 // Configuration for integration API
 const INTEGRATION_API_CONFIG = {
-  merchantId: process.env.LUXURY_PRESENCE_MERCHANT_ID || '2c1b04e0-e947-483f-8fc5-582fb079cf69',
+  merchantId: process.env.LUXURY_PRESENCE_MERCHANT_ID,
   apiKey: process.env.USE_CONTRACT_PROCESSING_KEY,
   apiEndpoint: process.env.TABS_API_ENDPOINT || 'https://integrators.prod.api.tabsplatform.com',
   refreshInterval: 3600000 // 1 hour in milliseconds
 };
 
-// Fallback mappings in case API is unavailable
-const FALLBACK_INTEGRATION_PAIRS = [
-  ['Ad Spend ($500)', 'Ad Spend ($500)'],
-  ['Ad Spend ($1,000)', 'Ad Spend ($1,000)'],
-  ['Ad Spend Add On', 'Ad Spend Add On'],
-  ['Presence Platform User Seat', 'Presence Platform User Seat'],
-  ['Additional Website Page', 'Additional Website Page'],
-  ['Agent Bio', 'Agent Bio'],
-  ['Agent Landing Pages', 'Agent Landing Pages'],
-  ['Agent Subdomains', 'Standard User Seat'],
-  ['Standard User Seat', 'Standard User Seat'],
-  ['AI Advertising Specialist', 'AI Advertising Specialist'],
-  ['AI Blog Specialist', 'AI Blog Specialist'],
-  ['AI Lead Nurture', 'AI Lead Nurture'],
-  ['AI SEO Specialist', 'AI SEO Specialist'],
-  ['All In', 'All In'],
-  ['All In Premier', 'All In Premier'],
-  ['Base', 'Base'],
-  ['Bespoke Website', 'Bespoke Website'],
-  ['Blog Migration', 'Blog Migration'],
-  ['Brand', 'Brand'],
-  ['Brand+', 'Brand+'],
-  ['Collective by Luxury Presence', 'Collective by Luxury Presence'],
-  ['Branded Mobile App User Seat', 'Branded Mobile App User Seat'],
-  ['Branded Mobile App Activation', 'Branded Mobile App Activation'],
-  ['Luxury Presence Mobile App User Seat', 'Luxury Presence Mobile App User Seat'],
-  ['Branded Mobile App Subscription', 'Branded Mobile App Subscription'],
-  ['Design Change (Pro)', 'Design Change (Pro)'],
-  ['Design Change (Custom)', 'Design Change (Custom)'],
-  ['Design Refresh', 'Design Refresh'],
-  ['Dev Hours', 'Dev Hours'],
-  ['Development Website (Monthly)', 'Development Website (Monthly)'],
-  ['One-Time Setup Fee (Development)', 'Development Website (One-Time Setup Fee)'],
-  ['Domain Forwarding', 'Domain Forwarding'],
-  ['Enterprise', 'Enterprise'],
-  ['Enterprise Features', 'Enterprise Features'],
-  ['Feed Integration Partner', 'Feed Integration Partner'],
-  ['Growth+', 'Growth+'],
-  ['IDX Tool', 'IDX Tool'],
-  ['Launch', 'Launch'],
-  ['Launch+', 'Launch+'],
-  ['Lead Gen Ads', 'Lead Gen Ads'],
-  ['Lead Gen Ads (Premier)', 'Lead Gen Ads (Premier)'],
-  ['Leads Premier', 'Leads Premier'],
-  ['Leads Pro', 'Leads Pro'],
-  ['Press Migration', 'Press Migration'],
-  ['Neighborhood Migration', 'Neighborhood Migration'],
-  ['Development Migration', 'Development Migration'],
-  ['Testimonial Migration', 'Testimonial Migration'],
-  ['Neighborhood Copy', 'Neighborhood Copy'],
-  ['Neighborhood Guide', 'Neighborhood Guide'],
-  ['One-Click Property Websites', 'One-Click Property Websites'],
-  ['One-Time Setup Fee (All In Premier Custom)', 'One-Time Setup Fee (All In Premier Custom)'],
-  ['One-Time Setup Fee (All In Premier)', 'One-Time Setup Fee (All In Premier)'],
-  ['One-Time Setup Fee (Brand+ & Custom)', 'One-Time Setup Fee (Brand+ & Custom)'],
-  ['One-Time Setup Fee (Brand+ & Pro)', 'One-Time Setup Fee (Brand+ & Pro)'],
-  ['One-Time Setup Fee (Launch+ & Custom)', 'One-Time Setup Fee (Launch+ & Custom)'],
-  ['One-Time Setup Fee (Launch+ & Pro)', 'One-Time Setup Fee (Launch+ & Pro)'],
-  ['One-Time Setup Fee (Leads Premier Custom)', 'One-Time Setup Fee (Leads Premier Custom)'],
-  ['One-Time Setup Fee (Leads Premier)', 'One-Time Setup Fee (Leads Premier)'],
-  ['One-Time Setup Fee (Leads Pro & Custom)', 'One-Time Setup Fee (Leads Pro & Custom)'],
-  ['One-Time Setup Fee (Leads Pro & Pro)', 'One-Time Setup Fee (Leads Pro & Pro)'],
-  ['One-Time Setup Fee (Presence Premier Custom)', 'One-Time Setup Fee (Presence Premier Custom)'],
-  ['One-Time Setup Fee (Presence Premier)', 'One-Time Setup Fee (Presence Premier)'],
-  ['One-Time Setup Fee (SEO Premier Custom)', 'One-Time Setup Fee (SEO Premier Custom)'],
-  ['One-Time Setup Fee (SEO Premier)', 'One-Time Setup Fee (SEO Premier)'],
-  ['One-Time Setup Fee (SEO Pro & Custom)', 'One-Time Setup Fee (SEO Pro & Custom)'],
-  ['One-Time Setup Fee (SEO Pro & Pro)', 'One-Time Setup Fee (SEO Pro & Pro)'],
-  ['Opening Video', 'Opening Video'],
-  ['Pages of Copywriting', 'Pages of Copywriting'],
-  ['Premium Support', 'Premium Support'],
-  ['Premium+', 'Premium+'],
-  ['Presence Premier', 'Presence Premier'],
-  ['Property Migration', 'Property Migration'],
-  ['Remove LP Link in Footer', 'Remove LP Link in Footer'],
-  ['Self-Serve Property Website (Monthly)', 'Self-Serve Property Website (Monthly)'],
-  ['One-Time Setup Fee (Self-Serve Property Website)', 'One-Time Setup Fee (Self-Serve Property Website)'],
-  ['SEO Blog Post', 'SEO Blog Post'],
-  ['SEO Migration', 'SEO Migration'],
-  ['SEO Premier', 'SEO Premier'],
-  ['SEO Pro', 'SEO Pro'],
-  ['Social Media', 'Social Media'],
-  ['Template Change', 'Template Change'],
-  ['Video Editing', 'Video Editing'],
-  ['12 Blogs per Quarter', '12 Blogs per Quarter'],
-  ['6 Blogs per Quarter', '6 Blogs per Quarter'],
-  ['Performance SEO Add On', 'Performance SEO Add On'],
-  ['Premium User Seat', 'Premium User Seat']
-];
-
 // Dynamic integration mappings (loaded from API)
-let INTEGRATION_BY_ITEM = new Map(
-  FALLBACK_INTEGRATION_PAIRS.map(([itemName, integrationId]) => [itemName.toLowerCase().trim(), integrationId])
-);
+let INTEGRATION_BY_ITEM = new Map();
 
 /**
  * Fetches integration item mappings from Tabs Platform API
@@ -150,7 +57,7 @@ async function fetchIntegrationMappings() {
     const mappings = data?.integrationItemMappings || [];
     
     if (mappings.length === 0) {
-      console.warn('⚠️  No integration mappings returned from API, using fallback');
+      console.warn('⚠️  No integration mappings returned from API');
       return;
     }
     
@@ -167,7 +74,7 @@ async function fetchIntegrationMappings() {
     console.log(`✅ Loaded ${INTEGRATION_BY_ITEM.size} integration mappings from API`);
   } catch (error) {
     console.error('❌ Failed to fetch integration mappings:', error.message);
-    console.log('📌 Using fallback integration mappings');
+    console.warn('⚠️  Integration item mapping will not be available');
   }
 }
 
